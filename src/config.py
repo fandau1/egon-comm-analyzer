@@ -21,5 +21,10 @@ GUI_FONT = ('Consolas', 9)
 # Time pairing threshold (milliseconds)
 TIME_PAIRING_THRESHOLD = 1000
 
-
-
+# UART filter configuration
+UART_FILTER_ENABLED = True
+UART_FILTER_MODE = 'include'  # 'include' or 'exclude'
+UART_FILTER_MATCH = 'exact'  # 'exact' or 'substring'
+UART_FILTER_HEX_PATTERNS: list[str] = [
+    "10a0553c3116",
+]

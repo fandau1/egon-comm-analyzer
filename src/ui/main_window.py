@@ -1,151 +1,17 @@
-import sys
 import time
-import threading
-from dataclasses import dataclass
-from scapy.all import sniff, get_if_list, get_if_addr
-from scapy.layers.inet import TCP, IP
+from PySide6 import QtWidgets
 
-from PySide6 import QtCore, QtWidgets
-import serial
-import serial.tools.list_ports
-
-import config
-
-@dataclass
-class LogEvent:
-    ts_ms: int
-    source: str  # 'TCP' or 'UART'
-    message: str
-
-
-class UartReader(QtCore.QObject):
-    opened = QtCore.Signal(str)  # port
-    closed = QtCore.Signal(str)
-    frameReceived = QtCore.Signal(bytes)
-    errorOccurred = QtCore.Signal(str)
-
-    def __init__(self, port: str, baudrate: int,
-                 start_byte: int, end_byte: int, max_len: int):
-        super().__init__()
-        self.port = port
-        self.baudrate = baudrate
-        self.start_byte = start_byte
-        self.end_byte = end_byte
-        self.max_len = max_len
-        self._ser: serial.Serial | None = None
-        self._rx_thread: threading.Thread | None = None
-        self._stop = threading.Event()
-
-    def start(self):
-        if self._rx_thread and self._rx_thread.is_alive():
-            return
-        self._stop.clear()
-        self._rx_thread = threading.Thread(target=self._run, daemon=True)
-        self._rx_thread.start()
-
-    def stop(self):
-        self._stop.set()
-        try:
-            if self._ser:
-                self._ser.close()
-        except Exception:
-            pass
-
-    def _run(self):
-        try:
-            self._ser = serial.Serial(self.port, self.baudrate, timeout=0.2)
-            self.opened.emit(self.port)
-        except Exception as e:
-            self.errorOccurred.emit(f"UART open error: {e}")
-            self.closed.emit("open_failed")
-            return
-        buf = bytearray()
-        try:
-            while not self._stop.is_set():
-                try:
-                    b = self._ser.read(1)
-                    if not b:
-                        continue
-                    byte = b[0]
-                    if byte == self.start_byte:
-                        buf.clear()
-                        buf.append(byte)
-                    else:
-                        if buf:
-                            buf.append(byte)
-                            if byte == self.end_byte:
-                                frame = bytes(buf)
-                                buf.clear()
-                                if 2 <= len(frame) <= self.max_len:
-                                    self.frameReceived.emit(frame)
-                            elif len(buf) > self.max_len:
-                                buf.clear()
-                except Exception as e:
-                    self.errorOccurred.emit(f"UART read error: {e}")
-                    break
-        finally:
-            try:
-                self._ser.close()
-            except Exception:
-                pass
-            self.closed.emit("stopped")
-
-class TcpSniffer(QtCore.QObject):
-    connected = QtCore.Signal()  # emitted when capture starts
-    disconnected = QtCore.Signal(str)
-    dataReceived = QtCore.Signal(bytes)
-    errorOccurred = QtCore.Signal(str)
-
-    def __init__(self, port: int, iface: str | None = None, target_ip: str | None = None):
-        super().__init__()
-        self.port = port
-        self.iface = iface
-        self.target_ip = target_ip
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
-
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-
-    def _run(self):
-        try:
-            bpf_filter = f"tcp port {self.port}"
-            if self.target_ip:
-                bpf_filter += f" and host {self.target_ip}"
-            self.connected.emit()
-            def _prn(pkt):
-                if self._stop.is_set():
-                    return
-                try:
-                    if not pkt.haslayer(TCP) or not pkt.haslayer(IP):
-                        return
-                    ip_layer = pkt[IP]
-                    tcp_layer = pkt[TCP]
-                    # Filter by target_ip if provided
-                    if self.target_ip and (self.target_ip not in [ip_layer.src, ip_layer.dst]):
-                        return
-                    payload = bytes(tcp_layer.payload) if tcp_layer.payload else b""
-                    if payload:
-                        self.dataReceived.emit(payload)
-                except Exception:
-                    pass
-            sniff(filter=bpf_filter, prn=_prn, store=False, iface=self.iface, stop_filter=lambda x: self._stop.is_set())
-        except Exception as e:
-            self.errorOccurred.emit(f"Sniffer error: {e}")
-        finally:
-            self.disconnected.emit("stopped")
+from src import config
+from src.core.models import LogEvent
+from src.services.tcp_sniffer import TcpSniffer
+from src.services.uart_reader import UartReader
+from src.services.filters import UartFilter
+from scapy.all import get_if_list, get_if_addr
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Egon Comunication Analyzer")
+        self.setWindowTitle("Egon Communication Analyzer")
         self.resize(config.GUI_WIDTH, config.GUI_HEIGHT)
         font = QtWidgets.QApplication.font()
         font.setFamily(config.GUI_FONT[0])
@@ -166,7 +32,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ifaceRow.addWidget(self.refreshIfaceButton)
         ifaceWidget = QtWidgets.QWidget()
         ifaceWidget.setLayout(ifaceRow)
-        # Sniffer mode controls
+        # Filter by target IP
         self.filterByHostCheck = QtWidgets.QCheckBox("Filter by target IP")
         self.filterByHostCheck.setChecked(True)
         scapyRow = QtWidgets.QHBoxLayout()
@@ -176,17 +42,42 @@ class MainWindow(QtWidgets.QMainWindow):
         # Serial controls
         self.serialPortCombo = QtWidgets.QComboBox()
         self.refreshSerialButton = QtWidgets.QPushButton("Refresh")
-        self.refreshSerialButton.setToolTip("Detect available COM ports from this PC")
+        self.serialBaudEdit = QtWidgets.QLineEdit(str(config.SERIAL_DEFAULT_BAUDRATE))
         sp_widget = QtWidgets.QWidget()
         sp_h = QtWidgets.QHBoxLayout(sp_widget)
         sp_h.setContentsMargins(0, 0, 0, 0)
         sp_h.addWidget(self.serialPortCombo)
         sp_h.addWidget(self.refreshSerialButton)
-        self.serialBaudEdit = QtWidgets.QLineEdit(str(config.SERIAL_DEFAULT_BAUDRATE))
+
+        # UART Filter controls
+        self.uartFilterEnabled = QtWidgets.QCheckBox("Enable UART Filter")
+        self.uartFilterEnabled.setChecked(getattr(config, 'UART_FILTER_ENABLED', True))
+        self.uartFilterModeCombo = QtWidgets.QComboBox()
+        self.uartFilterModeCombo.addItems(["include", "exclude"])
+        mode_idx = 0 if getattr(config, 'UART_FILTER_MODE', 'include') == 'include' else 1
+        self.uartFilterModeCombo.setCurrentIndex(mode_idx)
+        self.uartFilterMatchCombo = QtWidgets.QComboBox()
+        self.uartFilterMatchCombo.addItems(["exact", "substring"])
+        match_idx = 0 if getattr(config, 'UART_FILTER_MATCH', 'exact') == 'exact' else 1
+        self.uartFilterMatchCombo.setCurrentIndex(match_idx)
+        self.uartFilterPatternsEdit = QtWidgets.QLineEdit()
+        default_patterns = getattr(config, 'UART_FILTER_HEX_PATTERNS', [])
+        self.uartFilterPatternsEdit.setText(','.join(default_patterns))
+        self.uartFilterPatternsEdit.setPlaceholderText("Hex patterns separated by comma")
+        uartFilterLayout = QtWidgets.QHBoxLayout()
+        uartFilterLayout.addWidget(self.uartFilterEnabled)
+        uartFilterLayout.addWidget(QtWidgets.QLabel("Mode:"))
+        uartFilterLayout.addWidget(self.uartFilterModeCombo)
+        uartFilterLayout.addWidget(QtWidgets.QLabel("Match:"))
+        uartFilterLayout.addWidget(self.uartFilterMatchCombo)
+        uartFilterWidget = QtWidgets.QWidget()
+        uartFilterWidget.setLayout(uartFilterLayout)
+
         # Buttons
         self.startButton = QtWidgets.QPushButton("Start")
         self.stopButton = QtWidgets.QPushButton("Stop")
         self.stopButton.setEnabled(False)
+
         # Tables
         self.tcpTable = QtWidgets.QTableWidget(0, 2)
         self.tcpTable.setHorizontalHeaderLabels(["Time", "TCP Event"])
@@ -207,6 +98,8 @@ class MainWindow(QtWidgets.QMainWindow):
         topForm.addRow("Mode", scapyWidget)
         topForm.addRow("Serial Port", sp_widget)
         topForm.addRow("Serial Baud", self.serialBaudEdit)
+        topForm.addRow("UART Filter", uartFilterWidget)
+        topForm.addRow("Filter Patterns", self.uartFilterPatternsEdit)
 
         btns = QtWidgets.QHBoxLayout()
         btns.addWidget(self.startButton)
@@ -240,32 +133,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tcpEvents: list[LogEvent] = []
         self._uartEvents: list[LogEvent] = []
         self._synchronizingSelection = False  # prevent recursion
+        self._uartFilter = UartFilter(
+            enabled=self.uartFilterEnabled.isChecked(),
+            mode=self.uartFilterModeCombo.currentText(),
+            match_type=self.uartFilterMatchCombo.currentText(),
+            patterns=[p.strip() for p in self.uartFilterPatternsEdit.text().split(',') if p.strip()],
+        )
 
         # Wire up
         self.startButton.clicked.connect(self.onStart)
         self.stopButton.clicked.connect(self.onStop)
         self.tcpTable.itemSelectionChanged.connect(self._onTcpSelectionChanged)
         self.uartTable.itemSelectionChanged.connect(self._onUartSelectionChanged)
-        # Refresh button wiring and initial population
         self.refreshSerialButton.clicked.connect(self.refresh_serial_ports)
         self.refreshIfaceButton.clicked.connect(self.refresh_ifaces)
+        # Update filter when GUI controls change
+        self.uartFilterEnabled.toggled.connect(self._update_uart_filter)
+        self.uartFilterModeCombo.currentTextChanged.connect(self._update_uart_filter)
+        self.uartFilterMatchCombo.currentTextChanged.connect(self._update_uart_filter)
+        self.uartFilterPatternsEdit.textChanged.connect(self._update_uart_filter)
         # Populate interfaces initially
         self.refresh_ifaces()
 
+    def _update_uart_filter(self):
+        self._uartFilter = UartFilter(
+            enabled=self.uartFilterEnabled.isChecked(),
+            mode=self.uartFilterModeCombo.currentText(),
+            match_type=self.uartFilterMatchCombo.currentText(),
+            patterns=[p.strip() for p in self.uartFilterPatternsEdit.text().split(',') if p.strip()],
+        )
+
     def refresh_serial_ports(self):
-        """Detect COM ports on the PC and populate the serialPortCombo."""
-        # Keep signals blocked to avoid accidental triggers while updating
         self.serialPortCombo.blockSignals(True)
         self.serialPortCombo.clear()
-        # Add default from config as first/fallback entry (if set)
+        # Add default from config
         if getattr(config, "SERIAL_DEFAULT_PORT", ""):
             self.serialPortCombo.addItem(config.SERIAL_DEFAULT_PORT)
-        # Detect available ports and add them (avoid duplicates)
         existing = {self.serialPortCombo.itemText(i) for i in range(self.serialPortCombo.count())}
+        import serial.tools.list_ports
         for p in serial.tools.list_ports.comports():
             if p.device not in existing:
                 self.serialPortCombo.addItem(p.device)
-        # Select first real detected port if available (prefer non-default if present)
         if self.serialPortCombo.count() > 0:
             self.serialPortCombo.setCurrentIndex(0)
         self.serialPortCombo.blockSignals(False)
@@ -274,14 +182,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ifaceCombo.blockSignals(True)
         self.ifaceCombo.clear()
         try:
-            names = list(get_if_list())  # type: ignore
-            # Prefer non-loopback first
+            names = list(get_if_list())
             names_sorted = sorted(names, key=lambda n: ("loopback" in n.lower(), n.lower()))
             for name in names_sorted:
                 ip = ""
                 try:
-                    if get_if_addr:
-                        ip = get_if_addr(name)  # type: ignore
+                    ip = get_if_addr(name)
                 except Exception:
                     ip = ""
                 label = f"{name}{f' ({ip})' if ip else ''}"
@@ -303,7 +209,6 @@ class MainWindow(QtWidgets.QMainWindow):
         table.scrollToBottom()
 
     def appendLog(self, ev: LogEvent):
-        # ...existing code replaced by table logging...
         if ev.source == "TCP":
             self._tcpEvents.append(ev)
             self._append_to_table(self.tcpTable, ev)
@@ -311,20 +216,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._uartEvents.append(ev)
             self._append_to_table(self.uartTable, ev)
 
-
     def onStart(self):
         host = self.tcpHostEdit.text().strip()
         port = int(self.tcpPortEdit.text().strip())
         ser_port = self.serialPortCombo.currentText().strip()
         baud = int(self.serialBaudEdit.text().strip())
 
-        # Reset tables/events
         self.tcpTable.setRowCount(0)
         self.uartTable.setRowCount(0)
         self._tcpEvents.clear()
         self._uartEvents.clear()
 
-        # Use TcpSniffer (Scapy only)
         iface_name = None
         if self.ifaceCombo.count() > 0:
             iface_name = self.ifaceCombo.currentData()
@@ -337,7 +239,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpSniffer.dataReceived.connect(lambda data: self._onTcpData(data))
         self.tcpSniffer.errorOccurred.connect(lambda msg: self._onError("TCP", msg))
 
-        # UART
         self.uart = UartReader(
             ser_port, baud,
             config.SERIAL_START_BYTE,
@@ -349,7 +250,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uart.frameReceived.connect(lambda frame: self._onUartFrame(frame))
         self.uart.errorOccurred.connect(lambda msg: self._onError("UART", msg))
 
-        # Start
         self.tcpSniffer.start()
         self.uart.start()
         self.startButton.setEnabled(False)
@@ -363,7 +263,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.startButton.setEnabled(True)
         self.stopButton.setEnabled(False)
 
-    # Handlers
     def _onTcpConnected(self):
         ts = int(time.time()*1000)
         self.lastTcpConnectTs = ts
@@ -377,6 +276,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appendLog(LogEvent(int(time.time()*1000), "TCP", f"rx {len(data)} bytes: {preview.hex()}..."))
 
     def _onUartFrame(self, frame: bytes):
+        if not self._uartFilter.passes(frame):
+            return
         ts = int(time.time()*1000)
         msg = f"frame {len(frame)} bytes: {frame.hex()}"
         if self.lastTcpConnectTs is not None and (ts - self.lastTcpConnectTs) <= config.TIME_PAIRING_THRESHOLD:
@@ -386,9 +287,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _onError(self, src: str, msg: str):
         self.appendLog(LogEvent(int(time.time()*1000), src, f"ERROR: {msg}"))
 
-    # Selection sync
     def _select_nearest_in(self, target_table: QtWidgets.QTableWidget, target_events: list[LogEvent], ts_ms: int):
-        # Find nearest event within threshold
         best_idx = None
         best_delta = None
         for i, ev in enumerate(target_events):
@@ -432,13 +331,3 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._synchronizingSelection = False
 
-
-def main():
-    app = QtWidgets.QApplication(sys.argv)
-    w = MainWindow()
-    w.show()
-    sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()
