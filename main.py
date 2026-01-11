@@ -1,18 +1,9 @@
 import sys
 import time
-import socket
 import threading
 from dataclasses import dataclass
-
-# Try import scapy
-try:
-    from scapy.all import sniff, TCP, IP  # type: ignore
-    from scapy.all import get_if_list, get_if_addr  # type: ignore
-    SCAPY_AVAILABLE = True
-except Exception:
-    SCAPY_AVAILABLE = False
-    get_if_list = None  # type: ignore
-    get_if_addr = None  # type: ignore
+from scapy.all import sniff, get_if_list, get_if_addr
+from scapy.layers.inet import TCP, IP
 
 from PySide6 import QtCore, QtWidgets
 import serial
@@ -26,93 +17,6 @@ class LogEvent:
     source: str  # 'TCP' or 'UART'
     message: str
 
-class TcpClient(QtCore.QObject):
-    connected = QtCore.Signal()
-    disconnected = QtCore.Signal(str)  # reason
-    dataReceived = QtCore.Signal(bytes)
-    errorOccurred = QtCore.Signal(str)
-
-    def __init__(self, host: str, port: int):
-        super().__init__()
-        self.host = host
-        self.port = port
-        self._sock: socket.socket | None = None
-        self._rx_thread: threading.Thread | None = None
-        self._stop = threading.Event()
-
-    def start(self):
-        if self._rx_thread and self._rx_thread.is_alive():
-            return
-        self._stop.clear()
-        self._rx_thread = threading.Thread(target=self._run, daemon=True)
-        self._rx_thread.start()
-
-    def stop(self):
-        self._stop.set()
-        try:
-            if self._sock:
-                self._sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-        try:
-            if self._sock:
-                self._sock.close()
-        except Exception:
-            pass
-
-    def _run(self):
-        reconnect_delay = 0.5  # seconds
-        while not self._stop.is_set():
-            # Try to connect, keep retrying until success or stop
-            try:
-                self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self._sock.settimeout(2)
-                self._sock.connect((self.host, self.port))
-                self._sock.settimeout(0.2)
-                self.connected.emit()
-            except Exception as e:
-                self.errorOccurred.emit(f"TCP connect error: {e}")
-                # Wait and retry, do not emit disconnected yet
-                try:
-                    if self._sock:
-                        self._sock.close()
-                except Exception:
-                    pass
-                self._sock = None
-                # small sleep before retry
-                for _ in range(int(reconnect_delay*10)):
-                    if self._stop.is_set():
-                        break
-                    time.sleep(0.1)
-                continue
-
-            # Once connected, read until error/peer close/stop
-            try:
-                while not self._stop.is_set():
-                    try:
-                        data = self._sock.recv(4096)
-                        if not data:
-                            # Peer closed
-                            self.disconnected.emit("peer_closed")
-                            break
-                        self.dataReceived.emit(data)
-                    except socket.timeout:
-                        continue
-                    except Exception as e:
-                        self.errorOccurred.emit(f"TCP recv error: {e}")
-                        break
-            finally:
-                try:
-                    if self._sock:
-                        self._sock.close()
-                except Exception:
-                    pass
-                self._sock = None
-                # If not stopping, go back to connect loop
-                if not self._stop.is_set():
-                    self.disconnected.emit("reconnect")
-        # Final exit
-        self.disconnected.emit("stopped")
 
 class UartReader(QtCore.QObject):
     opened = QtCore.Signal(str)  # port
@@ -201,10 +105,6 @@ class TcpSniffer(QtCore.QObject):
         self._stop = threading.Event()
 
     def start(self):
-        if not SCAPY_AVAILABLE:
-            self.errorOccurred.emit("Scapy not available. Install scapy and Npcap on Windows.")
-            self.disconnected.emit("no_scapy")
-            return
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
@@ -266,22 +166,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ifaceRow.addWidget(self.refreshIfaceButton)
         ifaceWidget = QtWidgets.QWidget()
         ifaceWidget.setLayout(ifaceRow)
-        if not SCAPY_AVAILABLE:
-            self.ifaceCombo.setEnabled(False)
-            self.refreshIfaceButton.setEnabled(False)
         # Sniffer mode controls
-        self.snifferModeCheck = QtWidgets.QCheckBox("TCP Sniffer mode (Scapy)")
-        self.snifferModeCheck.setChecked(True if SCAPY_AVAILABLE else False)
         self.filterByHostCheck = QtWidgets.QCheckBox("Filter by target IP")
         self.filterByHostCheck.setChecked(True)
-        self.scapyStatusLabel = QtWidgets.QLabel("Scapy: available" if SCAPY_AVAILABLE else "Scapy: not available")
-        self.recheckScapyButton = QtWidgets.QPushButton("Recheck Scapy")
-        self.recheckScapyButton.setToolTip("Try to import Scapy again. Ensure Npcap is installed on Windows.")
         scapyRow = QtWidgets.QHBoxLayout()
-        scapyRow.addWidget(self.snifferModeCheck)
         scapyRow.addWidget(self.filterByHostCheck)
-        scapyRow.addWidget(self.scapyStatusLabel)
-        scapyRow.addWidget(self.recheckScapyButton)
         scapyWidget = QtWidgets.QWidget()
         scapyWidget.setLayout(scapyRow)
         # Serial controls
@@ -345,7 +234,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(top)
 
         # State
-        self.tcp: TcpClient | None = None
         self.tcpSniffer: TcpSniffer | None = None
         self.uart: UartReader | None = None
         self.lastTcpConnectTs: int | None = None
@@ -361,7 +249,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Refresh button wiring and initial population
         self.refreshSerialButton.clicked.connect(self.refresh_serial_ports)
         self.refreshIfaceButton.clicked.connect(self.refresh_ifaces)
-        self.recheckScapyButton.clicked.connect(self._recheck_scapy)
         # Populate interfaces initially
         self.refresh_ifaces()
 
@@ -386,24 +273,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def refresh_ifaces(self):
         self.ifaceCombo.blockSignals(True)
         self.ifaceCombo.clear()
-        if SCAPY_AVAILABLE and get_if_list:
-            try:
-                names = list(get_if_list())  # type: ignore
-                # Prefer non-loopback first
-                names_sorted = sorted(names, key=lambda n: ("loopback" in n.lower(), n.lower()))
-                for name in names_sorted:
+        try:
+            names = list(get_if_list())  # type: ignore
+            # Prefer non-loopback first
+            names_sorted = sorted(names, key=lambda n: ("loopback" in n.lower(), n.lower()))
+            for name in names_sorted:
+                ip = ""
+                try:
+                    if get_if_addr:
+                        ip = get_if_addr(name)  # type: ignore
+                except Exception:
                     ip = ""
-                    try:
-                        if get_if_addr:
-                            ip = get_if_addr(name)  # type: ignore
-                    except Exception:
-                        ip = ""
-                    label = f"{name}{f' ({ip})' if ip else ''}"
-                    self.ifaceCombo.addItem(label, userData=name)
-                if self.ifaceCombo.count() > 0:
-                    self.ifaceCombo.setCurrentIndex(0)
-            except Exception as e:
-                self._onError("TCP", f"Failed to list interfaces: {e}")
+                label = f"{name}{f' ({ip})' if ip else ''}"
+                self.ifaceCombo.addItem(label, userData=name)
+            if self.ifaceCombo.count() > 0:
+                self.ifaceCombo.setCurrentIndex(0)
+        except Exception as e:
+            self._onError("TCP", f"Failed to list interfaces: {e}")
         self.ifaceCombo.blockSignals(False)
 
     def _fmt_ts(self, ts_ms: int) -> str:
@@ -425,24 +311,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._uartEvents.append(ev)
             self._append_to_table(self.uartTable, ev)
 
-    def _recheck_scapy(self):
-        global SCAPY_AVAILABLE, sniff, TCP, IP, get_if_list, get_if_addr
-        try:
-            from scapy.all import sniff as _sniff, TCP as _TCP, IP as _IP, get_if_list as _gil, get_if_addr as _gia  # type: ignore
-            sniff, TCP, IP, get_if_list, get_if_addr = _sniff, _TCP, _IP, _gil, _gia
-            SCAPY_AVAILABLE = True
-            self.scapyStatusLabel.setText("Scapy: available")
-            self.ifaceCombo.setEnabled(True)
-            self.refreshIfaceButton.setEnabled(True)
-            if not self.snifferModeCheck.isChecked():
-                self.snifferModeCheck.setChecked(True)
-            self.refresh_ifaces()
-        except Exception as e:
-            SCAPY_AVAILABLE = False
-            self.scapyStatusLabel.setText("Scapy: not available")
-            self.ifaceCombo.setEnabled(False)
-            self.refreshIfaceButton.setEnabled(False)
-            self._onError("TCP", f"Scapy import failed: {e}. Install scapy and Npcap on Windows.")
 
     def onStart(self):
         host = self.tcpHostEdit.text().strip()
@@ -456,28 +324,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tcpEvents.clear()
         self._uartEvents.clear()
 
-        # Use sniffer if available and enabled, else fallback to TcpClient
-        use_sniffer = self.snifferModeCheck.isChecked() and SCAPY_AVAILABLE
-        if use_sniffer:
-            iface_name = None
-            if self.ifaceCombo.count() > 0:
-                iface_name = self.ifaceCombo.currentData()
-            filter_host = host if self.filterByHostCheck.isChecked() and host else None
-            bpf = f"tcp port {port}" + (f" and host {filter_host}" if filter_host else "")
-            self.appendLog(LogEvent(int(time.time()*1000), "TCP", f"starting sniffer on iface='{iface_name or 'default'}' filter='{bpf}'"))
-            self.tcpSniffer = TcpSniffer(port=port, iface=iface_name, target_ip=filter_host)
-            self.tcpSniffer.connected.connect(lambda: self._onTcpConnected())
-            self.tcpSniffer.disconnected.connect(lambda reason: self._onTcpDisconnected(reason))
-            self.tcpSniffer.dataReceived.connect(lambda data: self._onTcpData(data))
-            self.tcpSniffer.errorOccurred.connect(lambda msg: self._onError("TCP", msg))
-        else:
-            if self.snifferModeCheck.isChecked() and not SCAPY_AVAILABLE:
-                self._onError("TCP", "Scapy not available. Falling back to TCP client (active).")
-            self.tcp = TcpClient(host, port)
-            self.tcp.connected.connect(lambda: self._onTcpConnected())
-            self.tcp.disconnected.connect(lambda reason: self._onTcpDisconnected(reason))
-            self.tcp.dataReceived.connect(lambda data: self._onTcpData(data))
-            self.tcp.errorOccurred.connect(lambda msg: self._onError("TCP", msg))
+        # Use TcpSniffer (Scapy only)
+        iface_name = None
+        if self.ifaceCombo.count() > 0:
+            iface_name = self.ifaceCombo.currentData()
+        filter_host = host if self.filterByHostCheck.isChecked() and host else None
+        bpf = f"tcp port {port}" + (f" and host {filter_host}" if filter_host else "")
+        self.appendLog(LogEvent(int(time.time()*1000), "TCP", f"starting sniffer on iface='{iface_name or 'default'}' filter='{bpf}'"))
+        self.tcpSniffer = TcpSniffer(port=port, iface=iface_name, target_ip=filter_host)
+        self.tcpSniffer.connected.connect(lambda: self._onTcpConnected())
+        self.tcpSniffer.disconnected.connect(lambda reason: self._onTcpDisconnected(reason))
+        self.tcpSniffer.dataReceived.connect(lambda data: self._onTcpData(data))
+        self.tcpSniffer.errorOccurred.connect(lambda msg: self._onError("TCP", msg))
 
         # UART
         self.uart = UartReader(
@@ -490,18 +348,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uart.closed.connect(lambda r: self.appendLog(LogEvent(int(time.time()*1000), "UART", f"closed ({r})")))
         self.uart.frameReceived.connect(lambda frame: self._onUartFrame(frame))
         self.uart.errorOccurred.connect(lambda msg: self._onError("UART", msg))
+
         # Start
-        if use_sniffer and self.tcpSniffer:
-            self.tcpSniffer.start()
-        elif self.tcp:
-            self.tcp.start()
+        self.tcpSniffer.start()
         self.uart.start()
         self.startButton.setEnabled(False)
         self.stopButton.setEnabled(True)
 
     def onStop(self):
-        if self.tcp:
-            self.tcp.stop()
         if self.tcpSniffer:
             self.tcpSniffer.stop()
         if self.uart:
