@@ -5,7 +5,7 @@ Configuration file
 # Serial Port Configuration
 SERIAL_START_BYTE = 0x10  # Fixed start byte
 SERIAL_END_BYTE = 0x16    # Fixed end byte
-SERIAL_MAX_MESSAGE_LENGTH = 50
+SERIAL_MAX_MESSAGE_LENGTH = 200
 SERIAL_DEFAULT_PORT = "COM4"
 SERIAL_DEFAULT_BAUDRATE = 9600
 
@@ -23,7 +23,7 @@ TIME_PAIRING_THRESHOLD = 1000
 
 # UART filter configuration
 UART_FILTER_ENABLED = True
-UART_FILTER_MODE = 'include'  # 'include' or 'exclude'
+UART_FILTER_MODE = 'exclude'  # 'include' or 'exclude'
 UART_FILTER_MATCH = 'exact'  # 'exact' or 'substring'
 UART_FILTER_HEX_PATTERNS: list[str] = [
     "10a0553c3116",

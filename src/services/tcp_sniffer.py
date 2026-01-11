@@ -1,13 +1,14 @@
-import threading
 from PySide6 import QtCore
 from scapy.all import sniff
 from scapy.layers.inet import TCP, IP
+import threading
 
 class TcpSniffer(QtCore.QObject):
     connected = QtCore.Signal()  # emitted when capture starts
     disconnected = QtCore.Signal(str)
-    dataReceived = QtCore.Signal(bytes)
     errorOccurred = QtCore.Signal(str)
+    dataReceived = QtCore.Signal(bytes)
+    dataReceivedDir = QtCore.Signal(bytes, str)  # payload, direction: "RX" or "TX"
 
     def __init__(self, port: int, iface: str | None = None, target_ip: str | None = None):
         super().__init__()
@@ -41,11 +42,25 @@ class TcpSniffer(QtCore.QObject):
                         return
                     ip_layer = pkt[IP]
                     tcp_layer = pkt[TCP]
+                    # Filter by target_ip if provided
                     if self.target_ip and (self.target_ip not in [ip_layer.src, ip_layer.dst]):
                         return
                     payload = bytes(tcp_layer.payload) if tcp_layer.payload else b""
-                    if payload:
-                        self.dataReceived.emit(payload)
+                    if not payload:
+                        return
+                    # Derive direction
+                    direction = "RX"
+                    try:
+                        if self.target_ip:
+                            direction = "RX" if ip_layer.src == self.target_ip else ("TX" if ip_layer.dst == self.target_ip else "RX")
+                        else:
+                            # Heuristic: dport == monitored port => RX (incoming to monitored service), else TX
+                            direction = "RX" if tcp_layer.dport == self.port else "TX"
+                    except Exception:
+                        direction = "RX"
+                    # Emit both generic and directional signals for backward compatibility
+                    self.dataReceived.emit(payload)
+                    self.dataReceivedDir.emit(payload, direction)
                 except Exception:
                     pass
             sniff(filter=bpf_filter, prn=_prn, store=False, iface=self.iface, stop_filter=lambda x: self._stop.is_set())

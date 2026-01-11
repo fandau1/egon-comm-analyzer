@@ -1,13 +1,19 @@
 import time
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets
+from PySide6 import QtGui
 
 from src import config
 from src.core.models import LogEvent
 from src.services.tcp_sniffer import TcpSniffer
 from src.services.uart_reader import UartReader
 from src.services.filters import UartFilter
+from src.services.tcp_parser import parse_tcp_message
 from scapy.all import get_if_list, get_if_addr
 
+try:
+    from scapy.arch.windows import get_windows_if_list
+except Exception:
+    get_windows_if_list = None
 
 class UartFilterDialog(QtWidgets.QDialog):
     """Dialog pro nastavení UART filtrů."""
@@ -254,22 +260,64 @@ class MainWindow(QtWidgets.QMainWindow):
     def refresh_ifaces(self):
         self.ifaceCombo.blockSignals(True)
         self.ifaceCombo.clear()
+        entries = []
         try:
-            names = list(get_if_list())
-            names_sorted = sorted(names, key=lambda n: ("loopback" in n.lower(), n.lower()))
-            for name in names_sorted:
-                ip = ""
-                try:
-                    ip = get_if_addr(name)
-                except Exception:
+            # Primárně Windows detailní seznam
+            if get_windows_if_list:
+                win_ifaces = get_windows_if_list()
+
+                # Vyřadit prázdné/filtrační/virt adaptéry bez IP
+                def is_noise(name: str) -> bool:
+                    nl = name.lower()
+                    return any(tok in nl for tok in [
+                        "wfp", "npcap packet driver", "virtual switch extension", "extension filter",
+                        "lightweight filter", "wan miniport", "pseudo-interface", "hyper-v virtual"
+                    ])
+
+                for it in win_ifaces:
+                    name = it.get("name") or it.get("description") or ""
+                    if not name or is_noise(name):
+                        continue
+                    ips = it.get("ips") or []
+                    # Preferovat záznamy s IPv4
+                    ipv4 = next((ip for ip in ips if "." in ip), "")
+                    ipv6 = next((ip for ip in ips if ":" in ip and ip != "::1"), "")
+                    if not ipv4 and not ipv6:
+                        continue
+                    label_ip = ipv4 or ipv6
+                    entries.append((name, label_ip))
+            # Fallback: klasický seznam jmen
+            if not entries:
+                names = list(get_if_list())
+                for name in sorted(names, key=lambda n: ("loopback" in n.lower(), n.lower())):
                     ip = ""
+                    try:
+                        ip = get_if_addr(name)
+                    except Exception:
+                        ip = ""
+                    if not ip and "loopback" in name.lower():
+                        continue
+                    entries.append((name, ip))
+            # Naplnit combo
+            for name, ip in entries:
                 label = f"{name}{f' ({ip})' if ip else ''}"
                 self.ifaceCombo.addItem(label, userData=name)
             if self.ifaceCombo.count() > 0:
-                self.ifaceCombo.setCurrentIndex(0)
+                # Preferovat ne-loopback s IPv4
+                preferred = 0
+                for i in range(self.ifaceCombo.count()):
+                    text = self.ifaceCombo.itemText(i).lower()
+                    if "(" in text and "127.0.0.1" not in text and "loopback" not in text:
+                        preferred = i
+                        break
+                self.ifaceCombo.setCurrentIndex(preferred)
+            else:
+                self._onError("TCP",
+                              "Nenalezena žádná síťová rozhraní. Spusťte jako Administrator a zkontrolujte Npcap.")
         except Exception as e:
-            self._onError("TCP", f"Failed to list interfaces: {e}")
-        self.ifaceCombo.blockSignals(False)
+            self._onError("TCP", f"Chyba při výpisu rozhraní: {e}")
+        finally:
+            self.ifaceCombo.blockSignals(False)
 
     def _fmt_ts(self, ts_ms: int) -> str:
         return time.strftime('%H:%M:%S', time.localtime(ts_ms / 1000)) + f".{ts_ms % 1000:03d}"
@@ -309,7 +357,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpSniffer = TcpSniffer(port=port, iface=iface_name, target_ip=filter_host)
         self.tcpSniffer.connected.connect(lambda: self._onTcpConnected())
         self.tcpSniffer.disconnected.connect(lambda reason: self._onTcpDisconnected(reason))
-        self.tcpSniffer.dataReceived.connect(lambda data: self._onTcpData(data))
+        # Use directional signal
+        self.tcpSniffer.dataReceivedDir.connect(lambda data, direction: self._onTcpDataDir(data, direction))
         self.tcpSniffer.errorOccurred.connect(lambda msg: self._onError("TCP", msg))
 
         self.uart = UartReader(
@@ -344,9 +393,25 @@ class MainWindow(QtWidgets.QMainWindow):
     def _onTcpDisconnected(self, reason: str):
         self.appendLog(LogEvent(int(time.time()*1000), "TCP", f"disconnected ({reason})"))
 
-    def _onTcpData(self, data: bytes):
-        preview = data[:32]
-        self.appendLog(LogEvent(int(time.time()*1000), "TCP", f"rx {len(data)} bytes: {preview.hex()}..."))
+    def _onTcpDataDir(self, data: bytes, direction: str):
+        rec = parse_tcp_message(data)
+        ts_ms = int(time.time() * 1000)
+        if rec is not None:
+            seg_count = len(rec.segments)
+            header = f"M={rec.m or ''} S={rec.s or ''} P={rec.p or ''}"
+            segments_full = ", ".join(f"{sid}:{sval}" for sid, sval in rec.segments.items())
+            msg = f"{direction} | TCP parsed: {header} | segments={seg_count}{(' | ' + segments_full) if segments_full else ''}"
+        else:
+            msg = f"{direction} | {len(data)} bytes: {data}"
+        ev = LogEvent(ts_ms, "TCP", msg)
+        # append and colorize row
+        prev_rows = self.tcpTable.rowCount()
+        self.appendLog(ev)
+        color = QtGui.QColor("#e7f7e7") if direction.upper() == "RX" else QtGui.QColor("#ffe9e6")
+        for col in range(self.tcpTable.columnCount()):
+            item = self.tcpTable.item(prev_rows, col)
+            if item:
+                item.setBackground(QtGui.QBrush(color))
 
     def _onUartFrame(self, frame: bytes):
         if not self._uartFilter.passes(frame):
