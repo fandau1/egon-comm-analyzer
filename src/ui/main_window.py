@@ -1,5 +1,5 @@
 import time
-from PySide6 import QtWidgets
+from PySide6 import QtWidgets, QtCore
 
 from src import config
 from src.core.models import LogEvent
@@ -7,6 +7,64 @@ from src.services.tcp_sniffer import TcpSniffer
 from src.services.uart_reader import UartReader
 from src.services.filters import UartFilter
 from scapy.all import get_if_list, get_if_addr
+
+
+class UartFilterDialog(QtWidgets.QDialog):
+    """Dialog pro nastavení UART filtrů."""
+    def __init__(self, parent=None, initial: UartFilter | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("UART Filter Settings")
+        self.setModal(True)
+        self.resize(480, 180)
+
+        self.enableCheck = QtWidgets.QCheckBox("Enable UART Filter")
+        self.modeCombo = QtWidgets.QComboBox()
+        self.modeCombo.addItems(["include", "exclude"])
+        self.matchCombo = QtWidgets.QComboBox()
+        self.matchCombo.addItems(["exact", "substring"])
+        self.patternsEdit = QtWidgets.QLineEdit()
+        self.patternsEdit.setPlaceholderText("Hex patterns separated by comma, e.g., 10a0553c3116,1001ff")
+
+        if initial:
+            self.enableCheck.setChecked(initial.enabled)
+            self.modeCombo.setCurrentText(initial.mode)
+            self.matchCombo.setCurrentText(initial.match_type)
+            self.patternsEdit.setText(
+                ",".join(initial.patterns)
+            )
+        else:
+            self.enableCheck.setChecked(getattr(config, 'UART_FILTER_ENABLED', True))
+            self.modeCombo.setCurrentText(getattr(config, 'UART_FILTER_MODE', 'include'))
+            self.matchCombo.setCurrentText(getattr(config, 'UART_FILTER_MATCH', 'exact'))
+            self.patternsEdit.setText(
+                ",".join(getattr(config, 'UART_FILTER_HEX_PATTERNS', []))
+            )
+
+        form = QtWidgets.QFormLayout()
+        form.addRow(self.enableCheck)
+        form.addRow("Mode:", self.modeCombo)
+        form.addRow("Match:", self.matchCombo)
+        form.addRow("Patterns:", self.patternsEdit)
+
+        btnBox = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        btnBox.accepted.connect(self.accept)
+        btnBox.rejected.connect(self.reject)
+
+        v = QtWidgets.QVBoxLayout(self)
+        v.addLayout(form)
+        v.addWidget(btnBox)
+
+    def get_filter(self) -> UartFilter:
+        return UartFilter(
+            enabled=self.enableCheck.isChecked(),
+            mode=self.modeCombo.currentText(),
+            match_type=self.matchCombo.currentText(),
+            patterns=[p.strip().lower() for p in self.patternsEdit.text().split(',') if p.strip()],
+        )
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -18,67 +76,54 @@ class MainWindow(QtWidgets.QMainWindow):
         font.setPointSize(config.GUI_FONT[1])
         QtWidgets.QApplication.setFont(font)
 
-        # Controls
+        # Controls (compact top form)
         self.tcpHostEdit = QtWidgets.QLineEdit(config.TCP_DEFAULT_TARGET_IP)
+        self.tcpHostEdit.setPlaceholderText("Target IP")
         self.tcpPortEdit = QtWidgets.QLineEdit(str(config.TCP_DEFAULT_PORT))
+        self.tcpPortEdit.setFixedWidth(80)
+        self.tcpPortEdit.setPlaceholderText("Port")
         # Interface selection (Scapy)
         self.ifaceCombo = QtWidgets.QComboBox()
         self.ifaceCombo.setEditable(False)
-        self.refreshIfaceButton = QtWidgets.QPushButton("Refresh IFs")
+        # Use a small icon-only toolbutton for refresh
+        self.refreshIfaceButton = QtWidgets.QToolButton()
         self.refreshIfaceButton.setToolTip("Refresh network interfaces for Scapy")
+        self.refreshIfaceButton.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
+        self.refreshIfaceButton.setAutoRaise(True)
+        self.refreshIfaceButton.setFixedSize(24, 24)
         ifaceRow = QtWidgets.QHBoxLayout()
         ifaceRow.setContentsMargins(0, 0, 0, 0)
-        ifaceRow.addWidget(self.ifaceCombo)
+        ifaceRow.addWidget(self.ifaceCombo, stretch=1)
         ifaceRow.addWidget(self.refreshIfaceButton)
         ifaceWidget = QtWidgets.QWidget()
         ifaceWidget.setLayout(ifaceRow)
         # Filter by target IP
         self.filterByHostCheck = QtWidgets.QCheckBox("Filter by target IP")
         self.filterByHostCheck.setChecked(True)
-        scapyRow = QtWidgets.QHBoxLayout()
-        scapyRow.addWidget(self.filterByHostCheck)
-        scapyWidget = QtWidgets.QWidget()
-        scapyWidget.setLayout(scapyRow)
         # Serial controls
         self.serialPortCombo = QtWidgets.QComboBox()
-        self.refreshSerialButton = QtWidgets.QPushButton("Refresh")
-        self.serialBaudEdit = QtWidgets.QLineEdit(str(config.SERIAL_DEFAULT_BAUDRATE))
+        # Small icon-only toolbutton for serial refresh
+        self.refreshSerialButton = QtWidgets.QToolButton()
+        self.refreshSerialButton.setToolTip("Detect available COM ports from this PC")
+        self.refreshSerialButton.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
+        self.refreshSerialButton.setAutoRaise(True)
+        self.refreshSerialButton.setFixedSize(24, 24)
         sp_widget = QtWidgets.QWidget()
         sp_h = QtWidgets.QHBoxLayout(sp_widget)
         sp_h.setContentsMargins(0, 0, 0, 0)
-        sp_h.addWidget(self.serialPortCombo)
+        sp_h.addWidget(self.serialPortCombo, stretch=1)
         sp_h.addWidget(self.refreshSerialButton)
-
-        # UART Filter controls
-        self.uartFilterEnabled = QtWidgets.QCheckBox("Enable UART Filter")
-        self.uartFilterEnabled.setChecked(getattr(config, 'UART_FILTER_ENABLED', True))
-        self.uartFilterModeCombo = QtWidgets.QComboBox()
-        self.uartFilterModeCombo.addItems(["include", "exclude"])
-        mode_idx = 0 if getattr(config, 'UART_FILTER_MODE', 'include') == 'include' else 1
-        self.uartFilterModeCombo.setCurrentIndex(mode_idx)
-        self.uartFilterMatchCombo = QtWidgets.QComboBox()
-        self.uartFilterMatchCombo.addItems(["exact", "substring"])
-        match_idx = 0 if getattr(config, 'UART_FILTER_MATCH', 'exact') == 'exact' else 1
-        self.uartFilterMatchCombo.setCurrentIndex(match_idx)
-        self.uartFilterPatternsEdit = QtWidgets.QLineEdit()
-        default_patterns = getattr(config, 'UART_FILTER_HEX_PATTERNS', [])
-        self.uartFilterPatternsEdit.setText(','.join(default_patterns))
-        self.uartFilterPatternsEdit.setPlaceholderText("Hex patterns separated by comma")
-        uartFilterLayout = QtWidgets.QHBoxLayout()
-        uartFilterLayout.addWidget(self.uartFilterEnabled)
-        uartFilterLayout.addWidget(QtWidgets.QLabel("Mode:"))
-        uartFilterLayout.addWidget(self.uartFilterModeCombo)
-        uartFilterLayout.addWidget(QtWidgets.QLabel("Match:"))
-        uartFilterLayout.addWidget(self.uartFilterMatchCombo)
-        uartFilterWidget = QtWidgets.QWidget()
-        uartFilterWidget.setLayout(uartFilterLayout)
+        # Baud edit stays full width
+        self.serialBaudEdit = QtWidgets.QLineEdit(str(config.SERIAL_DEFAULT_BAUDRATE))
+        self.serialBaudEdit.setFixedWidth(100)
+        self.serialBaudEdit.setPlaceholderText("Baud")
 
         # Buttons
         self.startButton = QtWidgets.QPushButton("Start")
         self.stopButton = QtWidgets.QPushButton("Stop")
         self.stopButton.setEnabled(False)
 
-        # Tables
+        # Tables (main communication panels)
         self.tcpTable = QtWidgets.QTableWidget(0, 2)
         self.tcpTable.setHorizontalHeaderLabels(["Time", "TCP Event"])
         self.tcpTable.horizontalHeader().setStretchLastSection(True)
@@ -90,21 +135,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.uartTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
 
-        # Form
-        topForm = QtWidgets.QFormLayout()
-        topForm.addRow("TCP Host", self.tcpHostEdit)
-        topForm.addRow("TCP Port", self.tcpPortEdit)
-        topForm.addRow("Interface", ifaceWidget)
-        topForm.addRow("Mode", scapyWidget)
-        topForm.addRow("Serial Port", sp_widget)
-        topForm.addRow("Serial Baud", self.serialBaudEdit)
-        topForm.addRow("UART Filter", uartFilterWidget)
-        topForm.addRow("Filter Patterns", self.uartFilterPatternsEdit)
+        # Top bar restructured into two compact rows
+        topBar = QtWidgets.QWidget()
+        topGrid = QtWidgets.QGridLayout(topBar)
+        topGrid.setContentsMargins(0, 0, 0, 0)
+        topGrid.setHorizontalSpacing(8)
+        topGrid.setVerticalSpacing(6)
+        # Row 0: IP, Port, Interface, FilterByIP
+        row0 = QtWidgets.QHBoxLayout()
+        row0.setContentsMargins(0, 0, 0, 0)
+        row0.addWidget(QtWidgets.QLabel("IP:"))
+        row0.addWidget(self.tcpHostEdit, stretch=1)
+        row0.addSpacing(6)
+        row0.addWidget(QtWidgets.QLabel("Port:"))
+        row0.addWidget(self.tcpPortEdit)
+        row0.addSpacing(12)
+        row0.addWidget(QtWidgets.QLabel("Interface:"))
+        row0.addWidget(ifaceWidget, stretch=1)
+        row0.addSpacing(12)
+        row0.addWidget(self.filterByHostCheck)
+        row0Widget = QtWidgets.QWidget()
+        row0Widget.setLayout(row0)
+        topGrid.addWidget(row0Widget, 0, 0)
 
-        btns = QtWidgets.QHBoxLayout()
-        btns.addWidget(self.startButton)
-        btns.addWidget(self.stopButton)
+        # Row 1: Serial Port, Baud, Start/Stop
+        row1 = QtWidgets.QHBoxLayout()
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.addWidget(QtWidgets.QLabel("Serial:"))
+        row1.addWidget(sp_widget, stretch=1)
+        row1.addSpacing(12)
+        row1.addWidget(QtWidgets.QLabel("Baud:"))
+        row1.addWidget(self.serialBaudEdit)
+        row1.addStretch(1)
+        row1.addWidget(self.startButton)
+        row1.addWidget(self.stopButton)
+        row1Widget = QtWidgets.QWidget()
+        row1Widget.setLayout(row1)
+        topGrid.addWidget(row1Widget, 1, 0)
 
+        # Main splitter occupies most of the window
         split = QtWidgets.QSplitter()
         tcpPanel = QtWidgets.QWidget()
         tcpLayout = QtWidgets.QVBoxLayout(tcpPanel)
@@ -119,12 +188,22 @@ class MainWindow(QtWidgets.QMainWindow):
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 1)
 
-        top = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(top)
-        v.addLayout(topForm)
-        v.addLayout(btns)
-        v.addWidget(split)
-        self.setCentralWidget(top)
+        # Central layout
+        container = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(container)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(8)
+        v.addWidget(topBar)
+        v.addWidget(split, stretch=1)
+        self.setCentralWidget(container)
+
+        # Menu bar: Settings -> UART Filter
+        settingsMenu = self.menuBar().addMenu("Settings")
+        self.uartFilterAction = settingsMenu.addAction("UART Filter…")
+        self.uartFilterAction.triggered.connect(self._open_uart_filter_dialog)
+
+        # Status bar
+        self.statusBar().showMessage("Ready")
 
         # State
         self.tcpSniffer: TcpSniffer | None = None
@@ -134,10 +213,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._uartEvents: list[LogEvent] = []
         self._synchronizingSelection = False  # prevent recursion
         self._uartFilter = UartFilter(
-            enabled=self.uartFilterEnabled.isChecked(),
-            mode=self.uartFilterModeCombo.currentText(),
-            match_type=self.uartFilterMatchCombo.currentText(),
-            patterns=[p.strip() for p in self.uartFilterPatternsEdit.text().split(',') if p.strip()],
+            enabled=getattr(config, 'UART_FILTER_ENABLED', True),
+            mode=getattr(config, 'UART_FILTER_MODE', 'include'),
+            match_type=getattr(config, 'UART_FILTER_MATCH', 'exact'),
+            patterns=getattr(config, 'UART_FILTER_HEX_PATTERNS', []),
         )
 
         # Wire up
@@ -147,21 +226,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartTable.itemSelectionChanged.connect(self._onUartSelectionChanged)
         self.refreshSerialButton.clicked.connect(self.refresh_serial_ports)
         self.refreshIfaceButton.clicked.connect(self.refresh_ifaces)
-        # Update filter when GUI controls change
-        self.uartFilterEnabled.toggled.connect(self._update_uart_filter)
-        self.uartFilterModeCombo.currentTextChanged.connect(self._update_uart_filter)
-        self.uartFilterMatchCombo.currentTextChanged.connect(self._update_uart_filter)
-        self.uartFilterPatternsEdit.textChanged.connect(self._update_uart_filter)
-        # Populate interfaces initially
+        # Populate initially
         self.refresh_ifaces()
+        self.refresh_serial_ports()
 
-    def _update_uart_filter(self):
-        self._uartFilter = UartFilter(
-            enabled=self.uartFilterEnabled.isChecked(),
-            mode=self.uartFilterModeCombo.currentText(),
-            match_type=self.uartFilterMatchCombo.currentText(),
-            patterns=[p.strip() for p in self.uartFilterPatternsEdit.text().split(',') if p.strip()],
-        )
+    def _open_uart_filter_dialog(self):
+        dlg = UartFilterDialog(self, self._uartFilter)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._uartFilter = dlg.get_filter()
+            self.statusBar().showMessage("UART filter updated", 3000)
 
     def refresh_serial_ports(self):
         self.serialPortCombo.blockSignals(True)
@@ -330,4 +403,3 @@ class MainWindow(QtWidgets.QMainWindow):
             self._select_nearest_in(self.tcpTable, self._tcpEvents, ts_ms)
         finally:
             self._synchronizingSelection = False
-
