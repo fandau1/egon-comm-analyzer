@@ -1,7 +1,6 @@
 import time
 from PySide6 import QtWidgets
 from PySide6 import QtGui
-from PySide6 import QtCore
 
 from src import config
 from src.core.models import LogEvent
@@ -190,14 +189,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Main splitter occupies most of the window
         split = QtWidgets.QSplitter()
+
+        # TCP Panel with buttons
         tcpPanel = QtWidgets.QWidget()
         tcpLayout = QtWidgets.QVBoxLayout(tcpPanel)
+        tcpLayout.setContentsMargins(0, 0, 0, 0)
         tcpLayout.addWidget(QtWidgets.QLabel("TCP Monitor"))
         tcpLayout.addWidget(self.tcpTable)
+        # TCP buttons
+        tcpButtonsLayout = QtWidgets.QHBoxLayout()
+        self.tcpClearButton = QtWidgets.QPushButton("Clear Log")
+        self.tcpCopyAllButton = QtWidgets.QPushButton("Copy All")
+        self.tcpCopyRawButton = QtWidgets.QPushButton("Copy Raw")
+        tcpButtonsLayout.addWidget(self.tcpClearButton)
+        tcpButtonsLayout.addWidget(self.tcpCopyAllButton)
+        tcpButtonsLayout.addWidget(self.tcpCopyRawButton)
+        tcpButtonsLayout.addStretch()
+        tcpLayout.addLayout(tcpButtonsLayout)
+
+        # UART Panel with buttons
         uartPanel = QtWidgets.QWidget()
         uartLayout = QtWidgets.QVBoxLayout(uartPanel)
+        uartLayout.setContentsMargins(0, 0, 0, 0)
         uartLayout.addWidget(QtWidgets.QLabel("UART Monitor"))
         uartLayout.addWidget(self.uartTable)
+        # UART buttons
+        uartButtonsLayout = QtWidgets.QHBoxLayout()
+        self.uartClearButton = QtWidgets.QPushButton("Clear Log")
+        self.uartCopyAllButton = QtWidgets.QPushButton("Copy All")
+        self.uartCopyRawButton = QtWidgets.QPushButton("Copy Raw")
+        uartButtonsLayout.addWidget(self.uartClearButton)
+        uartButtonsLayout.addWidget(self.uartCopyAllButton)
+        uartButtonsLayout.addWidget(self.uartCopyRawButton)
+        uartButtonsLayout.addStretch()
+        uartLayout.addLayout(uartButtonsLayout)
+
         split.addWidget(tcpPanel)
         split.addWidget(uartPanel)
         split.setStretchFactor(0, 1)
@@ -241,6 +267,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartTable.itemSelectionChanged.connect(self._onUartSelectionChanged)
         self.refreshSerialButton.clicked.connect(self.refresh_serial_ports)
         self.refreshIfaceButton.clicked.connect(self.refresh_ifaces)
+        # Log management buttons
+        self.tcpClearButton.clicked.connect(self._onClearTcpLog)
+        self.tcpCopyAllButton.clicked.connect(self._onCopyAllTcp)
+        self.tcpCopyRawButton.clicked.connect(self._onCopyRawTcp)
+        self.uartClearButton.clicked.connect(self._onClearUartLog)
+        self.uartCopyAllButton.clicked.connect(self._onCopyAllUart)
+        self.uartCopyRawButton.clicked.connect(self._onCopyRawUart)
         # Populate initially
         self.refresh_ifaces()
         self.refresh_serial_ports()
@@ -397,6 +430,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._tcpEvents.append(ev)
             self._append_to_table(self.tcpTable, ev)
         else:
+            # Store raw frame data in the event
+            if frame is not None and ev.raw_data is None:
+                ev.raw_data = frame
             self._uartEvents.append(ev)
             if frame is not None:
                 self._append_uart_to_table(ev, frame)
@@ -535,3 +571,75 @@ class MainWindow(QtWidgets.QMainWindow):
             self._select_nearest_in(self.tcpTable, self._tcpEvents, ts_ms)
         finally:
             self._synchronizingSelection = False
+
+    # TCP Log Management
+    def _onClearTcpLog(self):
+        self.tcpTable.setRowCount(0)
+        self._tcpEvents.clear()
+        self.statusBar().showMessage("TCP log cleared", 2000)
+
+    def _onCopyAllTcp(self):
+        """Copy all TCP log entries to clipboard."""
+        lines = []
+        for ev in self._tcpEvents:
+            lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}")
+        text = "\n".join(lines)
+        QtWidgets.QApplication.clipboard().setText(text)
+        self.statusBar().showMessage(f"Copied {len(self._tcpEvents)} TCP entries to clipboard", 2000)
+
+    def _onCopyRawTcp(self):
+        """Copy selected TCP entry as raw data."""
+        selected = self.tcpTable.selectionModel().selectedRows()
+        if not selected:
+            self.statusBar().showMessage("No TCP entry selected", 2000)
+            return
+        row = selected[0].row()
+        if row < 0 or row >= len(self._tcpEvents):
+            return
+        ev = self._tcpEvents[row]
+        # Copy the raw message
+        QtWidgets.QApplication.clipboard().setText(ev.message)
+        self.statusBar().showMessage(f"Copied raw TCP entry to clipboard", 2000)
+
+    # UART Log Management
+    def _onClearUartLog(self):
+        self.uartTable.setRowCount(0)
+        self._uartEvents.clear()
+        self.statusBar().showMessage("UART log cleared", 2000)
+
+    def _onCopyAllUart(self):
+        """Copy all UART log entries to clipboard."""
+        lines = []
+        for ev in self._uartEvents:
+            lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}")
+        text = "\n".join(lines)
+        QtWidgets.QApplication.clipboard().setText(text)
+        self.statusBar().showMessage(f"Copied {len(self._uartEvents)} UART entries to clipboard", 2000)
+
+    def _onCopyRawUart(self):
+        """Copy selected UART entry as raw hex data."""
+        selected = self.uartTable.selectionModel().selectedRows()
+        if not selected:
+            self.statusBar().showMessage("No UART entry selected", 2000)
+            return
+        row = selected[0].row()
+        if row < 0 or row >= len(self._uartEvents):
+            return
+        ev = self._uartEvents[row]
+
+        # Try to get raw data first, then fallback to parsing message
+        if ev.raw_data is not None:
+            hex_data = ev.raw_data.hex()
+            QtWidgets.QApplication.clipboard().setText(hex_data)
+            self.statusBar().showMessage(f"Copied raw UART data ({len(ev.raw_data)} bytes) to clipboard", 2000)
+        else:
+            # Extract hex from message (format: "frame N bytes: HEXDATA")
+            msg = ev.message
+            if " bytes: " in msg:
+                hex_data = msg.split(" bytes: ")[1].split()[0]  # Get hex part before any additional text
+                QtWidgets.QApplication.clipboard().setText(hex_data)
+                self.statusBar().showMessage(f"Copied raw UART data to clipboard", 2000)
+            else:
+                QtWidgets.QApplication.clipboard().setText(msg)
+                self.statusBar().showMessage(f"Copied UART entry to clipboard", 2000)
+
