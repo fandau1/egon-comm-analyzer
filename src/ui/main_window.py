@@ -136,18 +136,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpTable.horizontalHeader().setStretchLastSection(True)
         self.tcpTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.tcpTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tcpTable.setWordWrap(True)
+        self.tcpTable.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+
         self.uartTable = QtWidgets.QTableWidget(0, 6)
         self.uartTable.setHorizontalHeaderLabels(["Time", "From", "To", "Data (Hex)", "Data (String)", "CHK"])
         self.uartTable.horizontalHeader().setStretchLastSection(True)
         self.uartTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.uartTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.uartTable.setWordWrap(True)
+        self.uartTable.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         # Set column widths
         self.uartTable.setColumnWidth(0, 100)  # Time
         self.uartTable.setColumnWidth(1, 60)   # From
         self.uartTable.setColumnWidth(2, 60)   # To
         self.uartTable.setColumnWidth(3, 200)  # Data (Hex)
         self.uartTable.setColumnWidth(4, 200)  # Data (String)
-        self.uartTable.setColumnWidth(5, 50)   # CHK
+        self.uartTable.setColumnWidth(5, 70)   # CHK
 
         # Top bar restructured into two compact rows
         topBar = QtWidgets.QWidget()
@@ -406,6 +411,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Checksum column with validation indicator
             chk_text = f"0x{parsed.checksum:02X}"
+
             if parsed.checksum_valid:
                 chk_text += " ✓"
                 chk_item = QtWidgets.QTableWidgetItem(chk_text)
@@ -416,12 +422,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 chk_item.setBackground(QtGui.QBrush(QtGui.QColor("#F8D7DA")))  # Light red
             self.uartTable.setItem(row, 5, chk_item)
         else:
-            # Unparsed message - show raw data
+            # Unparsed message - detect the problem
+            start_ok = frame[0] == 0x10 if len(frame) > 0 else False
+            end_ok = frame[-1] == 0x16 if len(frame) > 0 else False
+
+            if not start_ok and not end_ok:
+                problem = "⚠ chybí START (0x10) a END (0x16)"
+            elif not start_ok:
+                problem = "⚠ chybí START (0x10)"
+            elif not end_ok:
+                problem = "⚠ chybí END (0x16)"
+            else:
+                problem = "⚠ nevalidní formát"
+
+            # Show raw data with error indication
             self.uartTable.setItem(row, 1, QtWidgets.QTableWidgetItem("?"))
             self.uartTable.setItem(row, 2, QtWidgets.QTableWidgetItem("?"))
             self.uartTable.setItem(row, 3, QtWidgets.QTableWidgetItem(frame.hex()))
-            self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem("(invalid format)"))
+            self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem(problem))
             self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem("?"))
+
+            # Color row yellow to indicate parse error
+            warning_color = QtGui.QColor("#FFF4CC")  # Light yellow
+            for col in range(self.uartTable.columnCount()):
+                item = self.uartTable.item(row, col)
+                if item:
+                    item.setBackground(QtGui.QBrush(warning_color))
 
         self.uartTable.scrollToBottom()
 
@@ -473,6 +499,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uart.opened.connect(lambda p: self.appendLog(LogEvent(int(time.time()*1000), "UART", f"opened {p}")))
         self.uart.closed.connect(lambda r: self.appendLog(LogEvent(int(time.time()*1000), "UART", f"closed ({r})")))
         self.uart.frameReceived.connect(lambda frame: self._onUartFrame(frame))
+        self.uart.frameDropped.connect(lambda frame, reason: self._onUartFrameDropped(frame, reason))
         self.uart.errorOccurred.connect(lambda msg: self._onError("UART", msg))
 
         self.tcpSniffer.start()
@@ -524,6 +551,47 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.lastTcpConnectTs is not None and (ts - self.lastTcpConnectTs) <= config.TIME_PAIRING_THRESHOLD:
             msg += " [paired after TCP connect]"
         self.appendLog(LogEvent(ts, "UART", msg), frame=frame)
+
+    def _onUartFrameDropped(self, frame: bytes, reason: str):
+        """Handle dropped/invalid UART frames."""
+        ts = int(time.time()*1000)
+        reason_map = {
+            "too_short": "příliš krátká",
+            "too_long": "příliš dlouhá",
+            "buffer_overflow": "přetečení bufferu",
+            "incomplete_frame_interrupted": "nekompletní frame přerušen"
+        }
+        reason_text = reason_map.get(reason, reason)
+        msg = f"⚠ DROPPED frame ({reason_text}): {len(frame)} bytes: {frame.hex()}"
+
+        # Create event and add to log
+        ev = LogEvent(ts, "UART", msg)
+        prev_rows = self.uartTable.rowCount()
+
+        # Add unparsed entry with all columns marked as invalid
+        row = self.uartTable.rowCount()
+        self.uartTable.insertRow(row)
+
+        # Time column
+        time_item = QtWidgets.QTableWidgetItem(self._fmt_ts(ts))
+        self.uartTable.setItem(row, 0, time_item)
+
+        # Mark all data columns as invalid
+        self.uartTable.setItem(row, 1, QtWidgets.QTableWidgetItem("✗"))
+        self.uartTable.setItem(row, 2, QtWidgets.QTableWidgetItem("✗"))
+        self.uartTable.setItem(row, 3, QtWidgets.QTableWidgetItem(frame.hex()))
+        self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem(f"⚠ {reason_text}"))
+        self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem("✗"))
+
+        # Color the entire row red to indicate error
+        error_color = QtGui.QColor("#FFD6D6")  # Light red
+        for col in range(self.uartTable.columnCount()):
+            item = self.uartTable.item(row, col)
+            if item:
+                item.setBackground(QtGui.QBrush(error_color))
+
+        self.uartTable.scrollToBottom()
+        self._uartEvents.append(ev)
 
     def _onError(self, src: str, msg: str):
         self.appendLog(LogEvent(int(time.time()*1000), src, f"ERROR: {msg}"))
@@ -608,10 +676,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("UART log cleared", 2000)
 
     def _onCopyAllUart(self):
-        """Copy all UART log entries to clipboard."""
+        """Copy all UART log entries to clipboard with checksum validation status."""
         lines = []
         for ev in self._uartEvents:
-            lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}")
+            # Try to parse the frame to get checksum status
+            chk_status = ""
+            if ev.raw_data:
+                parsed = parse_uart_message(ev.raw_data)
+                if parsed:
+                    chk_status = " | CHK: ✓" if parsed.checksum_valid else " | CHK: ✗"
+
+            lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}{chk_status}")
         text = "\n".join(lines)
         QtWidgets.QApplication.clipboard().setText(text)
         self.statusBar().showMessage(f"Copied {len(self._uartEvents)} UART entries to clipboard", 2000)

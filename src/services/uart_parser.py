@@ -1,5 +1,7 @@
 """
-UART message parser for format: 10 (start) + sender_id + receiver_id + data + 16 (end)
+UART message parser for format: 10 (start) + sender_id + receiver_id + data + checksum + 16 (end)
+
+Uses 8-bit SUM checksum: (DST + SRC + all_data_bytes) & 0xFF
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -32,9 +34,9 @@ class UartMessage:
 def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
     """
     Parse UART message in format: 10 DST SRC <data> CHK 16
-    where DST = receiver ID, SRC = sender ID, CHK = checksum
+    where DST = receiver ID, SRC = sender ID, CHK = checksum (8-bit SUM)
 
-    Checksum = (DST + SRC + data_bytes) & 0xFF
+    Checksum = (DST + SRC + all_data_bytes) & 0xFF
 
     Args:
         frame: Raw frame bytes
