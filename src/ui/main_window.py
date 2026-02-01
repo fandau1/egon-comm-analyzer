@@ -1,6 +1,7 @@
 import time
 from PySide6 import QtWidgets
 from PySide6 import QtGui
+from PySide6 import QtCore
 
 from src import config
 from src.core.models import LogEvent
@@ -8,6 +9,7 @@ from src.services.tcp_sniffer import TcpSniffer
 from src.services.uart_reader import UartReader
 from src.services.filters import UartFilter
 from src.services.tcp_parser import parse_tcp_message
+from src.services.uart_parser import parse_uart_message, get_color_for_id
 from scapy.all import get_if_list, get_if_addr
 
 try:
@@ -135,11 +137,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpTable.horizontalHeader().setStretchLastSection(True)
         self.tcpTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.tcpTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.uartTable = QtWidgets.QTableWidget(0, 2)
-        self.uartTable.setHorizontalHeaderLabels(["Time", "UART Event"])
+        self.uartTable = QtWidgets.QTableWidget(0, 6)
+        self.uartTable.setHorizontalHeaderLabels(["Time", "From", "To", "Data (Hex)", "Data (String)", "CHK"])
         self.uartTable.horizontalHeader().setStretchLastSection(True)
         self.uartTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.uartTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Set column widths
+        self.uartTable.setColumnWidth(0, 100)  # Time
+        self.uartTable.setColumnWidth(1, 60)   # From
+        self.uartTable.setColumnWidth(2, 60)   # To
+        self.uartTable.setColumnWidth(3, 200)  # Data (Hex)
+        self.uartTable.setColumnWidth(4, 200)  # Data (String)
+        self.uartTable.setColumnWidth(5, 50)   # CHK
 
         # Top bar restructured into two compact rows
         topBar = QtWidgets.QWidget()
@@ -329,13 +338,71 @@ class MainWindow(QtWidgets.QMainWindow):
         table.setItem(row, 1, QtWidgets.QTableWidgetItem(ev.message))
         table.scrollToBottom()
 
-    def appendLog(self, ev: LogEvent):
+    def _append_uart_to_table(self, ev: LogEvent, frame: bytes):
+        """Append UART frame with parsed formatting."""
+        row = self.uartTable.rowCount()
+        self.uartTable.insertRow(row)
+
+        # Time column
+        time_item = QtWidgets.QTableWidgetItem(self._fmt_ts(ev.ts_ms))
+        self.uartTable.setItem(row, 0, time_item)
+
+        # Try to parse the message
+        parsed = parse_uart_message(frame)
+
+        if parsed:
+            # From column (sender ID)
+            from_item = QtWidgets.QTableWidgetItem(f"0x{parsed.sender_id:02X}")
+            from_color = get_color_for_id(parsed.sender_id)
+            from_item.setBackground(QtGui.QBrush(QtGui.QColor(from_color)))
+            self.uartTable.setItem(row, 1, from_item)
+
+            # To column (receiver ID)
+            to_item = QtWidgets.QTableWidgetItem(f"0x{parsed.receiver_id:02X}")
+            to_color = get_color_for_id(parsed.receiver_id)
+            to_item.setBackground(QtGui.QBrush(QtGui.QColor(to_color)))
+            self.uartTable.setItem(row, 2, to_item)
+
+            # Data (Hex) column
+            hex_item = QtWidgets.QTableWidgetItem(parsed.data.hex())
+            self.uartTable.setItem(row, 3, hex_item)
+
+            # Data (String) column
+            string_item = QtWidgets.QTableWidgetItem(parsed.data_as_string())
+            self.uartTable.setItem(row, 4, string_item)
+
+            # Checksum column with validation indicator
+            chk_text = f"0x{parsed.checksum:02X}"
+            if parsed.checksum_valid:
+                chk_text += " ✓"
+                chk_item = QtWidgets.QTableWidgetItem(chk_text)
+                chk_item.setBackground(QtGui.QBrush(QtGui.QColor("#D4EDDA")))  # Light green
+            else:
+                chk_text += " ✗"
+                chk_item = QtWidgets.QTableWidgetItem(chk_text)
+                chk_item.setBackground(QtGui.QBrush(QtGui.QColor("#F8D7DA")))  # Light red
+            self.uartTable.setItem(row, 5, chk_item)
+        else:
+            # Unparsed message - show raw data
+            self.uartTable.setItem(row, 1, QtWidgets.QTableWidgetItem("?"))
+            self.uartTable.setItem(row, 2, QtWidgets.QTableWidgetItem("?"))
+            self.uartTable.setItem(row, 3, QtWidgets.QTableWidgetItem(frame.hex()))
+            self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem("(invalid format)"))
+            self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem("?"))
+
+        self.uartTable.scrollToBottom()
+
+    def appendLog(self, ev: LogEvent, frame: bytes = None):
         if ev.source == "TCP":
             self._tcpEvents.append(ev)
             self._append_to_table(self.tcpTable, ev)
         else:
             self._uartEvents.append(ev)
-            self._append_to_table(self.uartTable, ev)
+            if frame is not None:
+                self._append_uart_to_table(ev, frame)
+            else:
+                # Fallback for non-frame UART events (e.g., status messages)
+                self._append_to_table(self.uartTable, ev)
 
     def onStart(self):
         host = self.tcpHostEdit.text().strip()
@@ -400,7 +467,7 @@ class MainWindow(QtWidgets.QMainWindow):
             seg_count = len(rec.segments)
             header = f"M={rec.m or ''} S={rec.s or ''} P={rec.p or ''}"
             segments_full = ", ".join(f"{sid}:{sval}" for sid, sval in rec.segments.items())
-            msg = f"{direction} | TCP parsed: {header} | segments={seg_count}{(' | ' + segments_full) if segments_full else ''}"
+            msg = f"{direction} | TCP parsed: {header} | D={(' | ' + segments_full) if segments_full else ''}"
         else:
             msg = f"{direction} | {len(data)} bytes: {data}"
         ev = LogEvent(ts_ms, "TCP", msg)
@@ -420,7 +487,7 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = f"frame {len(frame)} bytes: {frame.hex()}"
         if self.lastTcpConnectTs is not None and (ts - self.lastTcpConnectTs) <= config.TIME_PAIRING_THRESHOLD:
             msg += " [paired after TCP connect]"
-        self.appendLog(LogEvent(ts, "UART", msg))
+        self.appendLog(LogEvent(ts, "UART", msg), frame=frame)
 
     def _onError(self, src: str, msg: str):
         self.appendLog(LogEvent(int(time.time()*1000), src, f"ERROR: {msg}"))
