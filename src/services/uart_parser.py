@@ -2,6 +2,8 @@
 UART message parser for format: 10 (start) + sender_id + receiver_id + data + checksum + 16 (end)
 
 Uses 8-bit SUM checksum: (DST + SRC + all_data_bytes) & 0xFF
+
+Simple protocol - no escaping.
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -44,6 +46,7 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
     Returns:
         UartMessage if valid format, None otherwise
     """
+
     if len(frame) < 5:  # Minimum: 10 DST SRC CHK 16
         return None
 
