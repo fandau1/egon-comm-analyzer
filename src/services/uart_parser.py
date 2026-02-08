@@ -1,5 +1,7 @@
 """
-UART message parser for format: 10 (start) + sender_id + receiver_id + data + checksum + 16 (end)
+UART message parser for format:
+- 10 (start) + sender_id + receiver_id + data + checksum + 16 (end)  [short/control messages]
+- 43 (start) + sender_id + receiver_id + data + checksum + 16 (end)  [data messages]
 
 Uses 8-bit SUM checksum: (DST + SRC + all_data_bytes) & 0xFF
 
@@ -18,11 +20,13 @@ class UartMessage:
     checksum: int
     raw: bytes
     checksum_valid: bool
+    message_type: str  # "control" (0x10) or "data" (0x43)
 
     def __str__(self) -> str:
         """String representation of the message."""
         chk_status = "✓" if self.checksum_valid else "✗"
-        return f"[{self.sender_id:02X}→{self.receiver_id:02X}] {self.data.hex()} CHK:{chk_status}"
+        type_marker = "C" if self.message_type == "control" else "D"
+        return f"[{type_marker}:{self.sender_id:02X}→{self.receiver_id:02X}] {self.data.hex()} CHK:{chk_status}"
 
     def data_as_string(self) -> str:
         """Try to decode data as ASCII string, fallback to hex."""
@@ -35,7 +39,10 @@ class UartMessage:
 
 def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
     """
-    Parse UART message in format: 10 DST SRC <data> CHK 16
+    Parse UART message in format:
+    - 10 DST SRC <data> CHK 16  [control message]
+    - 43 DST SRC <data> CHK 16  [data message]
+
     where DST = receiver ID, SRC = sender ID, CHK = checksum (8-bit SUM)
 
     Checksum = (DST + SRC + all_data_bytes) & 0xFF
@@ -47,12 +54,16 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
         UartMessage if valid format, None otherwise
     """
 
-    if len(frame) < 5:  # Minimum: 10 DST SRC CHK 16
+    if len(frame) < 5:  # Minimum: START DST SRC CHK END
         return None
 
     # Check start and end bytes
-    if frame[0] != 0x10 or frame[-1] != 0x16:
+    start_byte = frame[0]
+    if start_byte not in (0x10, 0x43) or frame[-1] != 0x16:
         return None
+
+    # Determine message type
+    message_type = "control" if start_byte == 0x10 else "data"
 
     # Extract sender and receiver IDs
     receiver_id = frame[1]  # DST
@@ -74,7 +85,8 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
         data=data,
         checksum=checksum,
         raw=frame,
-        checksum_valid=checksum_valid
+        checksum_valid=checksum_valid,
+        message_type=message_type
     )
 
 

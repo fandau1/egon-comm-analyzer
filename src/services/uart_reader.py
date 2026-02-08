@@ -7,15 +7,18 @@ class UartReader(QtCore.QObject):
     UART frame reader with simple START/END detection.
 
     Protocol:
-    - START byte: 0x10 - begins a new frame
+    - START bytes: 0x10 (short/control messages) or 0x43 (data messages)
     - END byte: 0x16 - marks end of frame
 
-    Frame format: 10 [data...] 16
+    Frame formats:
+    - 10 [data...] 16 - short/control frames
+    - 43 [data...] 16 - data frames
 
     Simple parsing:
-    - 0x10 starts new frame (discards incomplete previous frame)
+    - 0x10 or 0x43 starts new frame (discards incomplete previous frame)
     - 0x16 ends current frame
     - No escaping/stuffing
+    - Same checksum (SUM8) for both types
     """
     opened = QtCore.Signal(str)  # port
     closed = QtCore.Signal(str)
@@ -29,7 +32,8 @@ class UartReader(QtCore.QObject):
         super().__init__()
         self.port = port
         self.baudrate = baudrate
-        self.start_byte = start_byte
+        self.start_byte = start_byte  # Primary start byte (0x10)
+        self.start_byte_alt = 0x43  # Alternative start byte for data frames
         self.end_byte = end_byte
         self.max_len = max_len
         self._ser: serial.Serial | None = None
@@ -74,11 +78,9 @@ class UartReader(QtCore.QObject):
                     # Emit raw data before any parsing
                     self.rawDataReceived.emit(b)
 
-                    if byte == self.start_byte:
+                    # Check for START bytes (0x10 or 0x43) - BUT ONLY if we're NOT already in a frame
+                    if not in_frame and (byte == self.start_byte or byte == self.start_byte_alt):
                         # START byte - begin new frame
-                        if in_frame and len(buf) > 0:
-                            # Had incomplete frame
-                            self.frameDropped.emit(bytes(buf), "incomplete_frame_interrupted")
                         buf.clear()
                         buf.append(byte)
                         in_frame = True
