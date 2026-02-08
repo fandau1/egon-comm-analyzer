@@ -73,6 +73,132 @@ class UartFilterDialog(QtWidgets.QDialog):
         )
 
 
+class ChecksumCalculatorDialog(QtWidgets.QDialog):
+    """Dialog for calculating UART checksum from hex input."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("UART Checksum Calculator")
+        self.setMinimumWidth(500)
+
+        # Input field
+        self.inputLabel = QtWidgets.QLabel("Zadejte data v HEX formátu (např. A0 55 49 nebo A05549):")
+        self.inputEdit = QtWidgets.QLineEdit()
+        self.inputEdit.setPlaceholderText("A0 55 49 nebo A05549")
+        self.inputEdit.textChanged.connect(self._calculate)
+
+        # Results
+        self.resultLabel = QtWidgets.QLabel("Výsledek:")
+        self.resultLabel.setStyleSheet("font-weight: bold;")
+
+        self.checksumLabel = QtWidgets.QLabel("Checksum: -")
+        self.checksumLabel.setStyleSheet("font-size: 14pt; color: #0066cc;")
+
+        self.detailsLabel = QtWidgets.QLabel("")
+        self.detailsLabel.setWordWrap(True)
+        self.detailsLabel.setStyleSheet("color: #666;")
+
+        self.frameLabel = QtWidgets.QLabel("")
+        self.frameLabel.setWordWrap(True)
+        self.frameLabel.setStyleSheet("font-family: monospace; background-color: #f0f0f0; padding: 8px;")
+
+        # Copy button
+        self.copyButton = QtWidgets.QPushButton("Kopírovat checksum")
+        self.copyButton.clicked.connect(self._copy_checksum)
+        self.copyButton.setEnabled(False)
+
+        # Close button
+        closeButton = QtWidgets.QPushButton("Zavřít")
+        closeButton.clicked.connect(self.accept)
+
+        # Layout
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.inputLabel)
+        layout.addWidget(self.inputEdit)
+        layout.addSpacing(10)
+        layout.addWidget(self.resultLabel)
+        layout.addWidget(self.checksumLabel)
+        layout.addWidget(self.detailsLabel)
+        layout.addWidget(self.frameLabel)
+        layout.addSpacing(10)
+
+        btnLayout = QtWidgets.QHBoxLayout()
+        btnLayout.addWidget(self.copyButton)
+        btnLayout.addStretch()
+        btnLayout.addWidget(closeButton)
+        layout.addLayout(btnLayout)
+
+        self._last_checksum = None
+
+    def _calculate(self):
+        """Calculate checksum from input."""
+        text = self.inputEdit.text().strip()
+
+        if not text:
+            self.checksumLabel.setText("Checksum: -")
+            self.detailsLabel.setText("")
+            self.frameLabel.setText("")
+            self.copyButton.setEnabled(False)
+            self._last_checksum = None
+            return
+
+        try:
+            # Remove spaces and convert to bytes
+            hex_str = text.replace(" ", "").replace("0x", "").lower()
+
+            # Validate hex
+            if not all(c in '0123456789abcdef' for c in hex_str):
+                raise ValueError("Neplatné HEX znaky")
+
+            # Must be even length
+            if len(hex_str) % 2 != 0:
+                raise ValueError("Lichý počet HEX znaků")
+
+            # Convert to bytes
+            data = bytes.fromhex(hex_str)
+
+            if len(data) == 0:
+                raise ValueError("Prázdná data")
+
+            # Calculate checksum: sum of all bytes & 0xFF
+            checksum = sum(data) & 0xFF
+            self._last_checksum = checksum
+
+            # Display result
+            self.checksumLabel.setText(f"Checksum: 0x{checksum:02X} ({checksum})")
+            self.checksumLabel.setStyleSheet("font-size: 14pt; color: #00cc00;")
+
+            # Details
+            byte_list = " + ".join([f"0x{b:02X}" for b in data])
+            total = sum(data)
+            self.detailsLabel.setText(
+                f"Výpočet: {byte_list} = {total} (0x{total:X})\n"
+                f"Checksum = {total} & 0xFF = {checksum} (0x{checksum:02X})"
+            )
+
+            # Complete frame example (assuming format: 10 <data> CHK 16)
+            frame_hex = f"10 {hex_str} {checksum:02x} 16"
+            frame_formatted = " ".join([frame_hex[i:i+2] for i in range(0, len(frame_hex.replace(' ', '')), 2)])
+            self.frameLabel.setText(f"Kompletní frame:\n{frame_formatted.upper()}")
+
+            self.copyButton.setEnabled(True)
+
+        except ValueError as e:
+            self.checksumLabel.setText(f"Chyba: {e}")
+            self.checksumLabel.setStyleSheet("font-size: 14pt; color: #cc0000;")
+            self.detailsLabel.setText("")
+            self.frameLabel.setText("")
+            self.copyButton.setEnabled(False)
+            self._last_checksum = None
+
+    def _copy_checksum(self):
+        """Copy checksum to clipboard."""
+        if self._last_checksum is not None:
+            QtWidgets.QApplication.clipboard().setText(f"{self._last_checksum:02X}")
+            self.copyButton.setText("✓ Zkopírováno!")
+            QtWidgets.QTimer.singleShot(2000, lambda: self.copyButton.setText("Kopírovat checksum"))
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -225,12 +351,53 @@ class MainWindow(QtWidgets.QMainWindow):
         tcpButtonsLayout.addStretch()
         tcpLayout.addLayout(tcpButtonsLayout)
 
-        # UART Panel with buttons
+        # UART Panel with tabs for parsed/raw view
         uartPanel = QtWidgets.QWidget()
         uartLayout = QtWidgets.QVBoxLayout(uartPanel)
         uartLayout.setContentsMargins(0, 0, 0, 0)
         uartLayout.addWidget(QtWidgets.QLabel("UART Monitor"))
-        uartLayout.addWidget(self.uartTable)
+
+        # Create tab widget for UART views
+        self.uartTabWidget = QtWidgets.QTabWidget()
+
+        # Parsed view tab
+        parsedTab = QtWidgets.QWidget()
+        parsedLayout = QtWidgets.QVBoxLayout(parsedTab)
+        parsedLayout.setContentsMargins(0, 0, 0, 0)
+        parsedLayout.addWidget(self.uartTable)
+        self.uartTabWidget.addTab(parsedTab, "Parsed")
+
+        # RAW hex view tab
+        rawTab = QtWidgets.QWidget()
+        rawLayout = QtWidgets.QVBoxLayout(rawTab)
+        rawLayout.setContentsMargins(0, 0, 0, 0)
+        self.uartRawTable = QtWidgets.QTableWidget(0, 2)
+        self.uartRawTable.setHorizontalHeaderLabels(["Time", "Raw Data (Hex)"])
+        self.uartRawTable.horizontalHeader().setStretchLastSection(True)
+        self.uartRawTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.uartRawTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.uartRawTable.setWordWrap(True)
+        self.uartRawTable.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.uartRawTable.setColumnWidth(0, 100)  # Time
+        rawLayout.addWidget(self.uartRawTable)
+
+        # RAW search bar
+        rawSearchLayout = QtWidgets.QHBoxLayout()
+        rawSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
+        self.uartRawSearchEdit = QtWidgets.QLineEdit()
+        self.uartRawSearchEdit.setPlaceholderText("Enter hex to search (e.g., 10A055)...")
+        self.uartRawSearchPrevButton = QtWidgets.QPushButton("◄ Prev")
+        self.uartRawSearchNextButton = QtWidgets.QPushButton("Next ►")
+        self.uartRawSearchClearButton = QtWidgets.QPushButton("Clear")
+        rawSearchLayout.addWidget(self.uartRawSearchEdit)
+        rawSearchLayout.addWidget(self.uartRawSearchPrevButton)
+        rawSearchLayout.addWidget(self.uartRawSearchNextButton)
+        rawSearchLayout.addWidget(self.uartRawSearchClearButton)
+        rawLayout.addLayout(rawSearchLayout)
+
+        self.uartTabWidget.addTab(rawTab, "RAW Hex")
+
+        uartLayout.addWidget(self.uartTabWidget)
         # UART search bar
         uartSearchLayout = QtWidgets.QHBoxLayout()
         uartSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
@@ -273,6 +440,9 @@ class MainWindow(QtWidgets.QMainWindow):
         settingsMenu = self.menuBar().addMenu("Settings")
         self.uartFilterAction = settingsMenu.addAction("UART Filter…")
         self.uartFilterAction.triggered.connect(self._open_uart_filter_dialog)
+        settingsMenu.addSeparator()
+        self.checksumCalcAction = settingsMenu.addAction("Calculate Checksum…")
+        self.checksumCalcAction.triggered.connect(self._open_checksum_calculator)
 
         # Status bar
         self.statusBar().showMessage("Ready")
@@ -283,11 +453,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lastTcpConnectTs: int | None = None
         self._tcpEvents: list[LogEvent] = []
         self._uartEvents: list[LogEvent] = []
+        self._uartRawEvents: list[LogEvent] = []  # For RAW hex view
+        self._uartRawBuffer: bytearray = bytearray()  # Buffer for raw bytes
+        self._uartRawLastFlush: float = 0  # Last time we flushed raw buffer
         self._synchronizingSelection = False  # prevent recursion
         self._tcpSearchResults: list[int] = []  # List of matching row indices
         self._tcpSearchIndex: int = -1  # Current position in search results
         self._uartSearchResults: list[int] = []
         self._uartSearchIndex: int = -1
+        self._uartRawSearchResults: list[int] = []
+        self._uartRawSearchIndex: int = -1
         self._uartFilter = UartFilter(
             enabled=getattr(config, 'UART_FILTER_ENABLED', True),
             mode=getattr(config, 'UART_FILTER_MODE', 'include'),
@@ -320,6 +495,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartSearchNextButton.clicked.connect(self._onUartSearchNext)
         self.uartSearchPrevButton.clicked.connect(self._onUartSearchPrev)
         self.uartSearchClearButton.clicked.connect(self._onUartSearchClear)
+        self.uartRawSearchEdit.returnPressed.connect(self._onUartRawSearchNext)
+        self.uartRawSearchEdit.textChanged.connect(self._onUartRawSearchTextChanged)
+        self.uartRawSearchNextButton.clicked.connect(self._onUartRawSearchNext)
+        self.uartRawSearchPrevButton.clicked.connect(self._onUartRawSearchPrev)
+        self.uartRawSearchClearButton.clicked.connect(self._onUartRawSearchClear)
         # Populate initially
         self.refresh_ifaces()
         self.refresh_serial_ports()
@@ -329,6 +509,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self._uartFilter = dlg.get_filter()
             self.statusBar().showMessage("UART filter updated", 3000)
+
+    def _open_checksum_calculator(self):
+        """Open dialog to calculate UART checksum for user input."""
+        dlg = ChecksumCalculatorDialog(self)
+        dlg.exec()
 
     def refresh_serial_ports(self):
         self.serialPortCombo.blockSignals(True)
@@ -514,6 +699,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if frame is not None and ev.raw_data is None:
                 ev.raw_data = frame
             self._uartEvents.append(ev)
+
+            # Add to parsed table
             if frame is not None:
                 self._append_uart_to_table(ev, frame)
             else:
@@ -528,8 +715,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tcpTable.setRowCount(0)
         self.uartTable.setRowCount(0)
+        self.uartRawTable.setRowCount(0)
         self._tcpEvents.clear()
         self._uartEvents.clear()
+        self._uartRawEvents.clear()
+        self._uartRawBuffer.clear()
+        self._uartRawLastFlush = 0
 
         iface_name = None
         if self.ifaceCombo.count() > 0:
@@ -554,6 +745,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uart.closed.connect(lambda r: self.appendLog(LogEvent(int(time.time()*1000), "UART", f"closed ({r})")))
         self.uart.frameReceived.connect(lambda frame: self._onUartFrame(frame))
         self.uart.frameDropped.connect(lambda frame, reason: self._onUartFrameDropped(frame, reason))
+        self.uart.rawDataReceived.connect(lambda data: self._onUartRawData(data))
         self.uart.errorOccurred.connect(lambda msg: self._onError("UART", msg))
 
         self.tcpSniffer.start()
@@ -562,6 +754,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stopButton.setEnabled(True)
 
     def onStop(self):
+        # Flush any remaining raw data
+        if hasattr(self, '_uartRawBuffer') and len(self._uartRawBuffer) > 0:
+            self._flushRawBuffer()
+
         if self.tcpSniffer:
             self.tcpSniffer.stop()
         if self.uart:
@@ -620,9 +816,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Create event and add to log
         ev = LogEvent(ts, "UART", msg)
-        prev_rows = self.uartTable.rowCount()
+        ev.raw_data = frame
 
-        # Add unparsed entry with all columns marked as invalid
+        # Add unparsed entry to parsed table with all columns marked as invalid
         row = self.uartTable.rowCount()
         self.uartTable.insertRow(row)
 
@@ -646,6 +842,82 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.uartTable.scrollToBottom()
         self._uartEvents.append(ev)
+
+    def _onUartRawData(self, data: bytes):
+        """Handle raw UART data without any frame parsing."""
+        import time as time_module
+
+        # Add to buffer
+        self._uartRawBuffer.extend(data)
+
+        current_time = time_module.time()
+
+        # Flush buffer if:
+        # 1. We have 32+ bytes (one line), OR
+        # 2. 100ms passed since last flush
+        should_flush = (
+            len(self._uartRawBuffer) >= 32 or
+            (self._uartRawLastFlush > 0 and (current_time - self._uartRawLastFlush) > 0.1)
+        )
+
+        if should_flush and len(self._uartRawBuffer) > 0:
+            self._flushRawBuffer()
+
+    def _flushRawBuffer(self):
+        """Flush accumulated raw data to the RAW table."""
+        import time as time_module
+
+        if len(self._uartRawBuffer) == 0:
+            return
+
+        ts = int(time.time() * 1000)
+        raw_data = bytes(self._uartRawBuffer)
+
+        # Apply filter if enabled
+        if self._uartFilter.enabled:
+            # For raw data, we need to check if any part matches
+            # This is tricky - let's just show everything in RAW mode when filter is enabled
+            # User can use search to find specific patterns
+            pass
+
+        # Create event
+        raw_ev = LogEvent(ts, "UART", f"{len(raw_data)} bytes")
+        raw_ev.raw_data = raw_data
+        self._uartRawEvents.append(raw_ev)
+
+        # Add to table
+        row = self.uartRawTable.rowCount()
+        self.uartRawTable.insertRow(row)
+
+        # Time column
+        time_item = QtWidgets.QTableWidgetItem(self._fmt_ts(ts))
+        self.uartRawTable.setItem(row, 0, time_item)
+
+        # Raw hex data with proper formatting
+        hex_str = raw_data.hex().upper()
+        # Add spaces every 2 characters for readability
+        formatted_hex = ' '.join([hex_str[i:i+2] for i in range(0, len(hex_str), 2)])
+        raw_item = QtWidgets.QTableWidgetItem(formatted_hex)
+
+        # Highlight START (0x10) and END (0x16) bytes with color
+        # Check if data contains these markers
+        has_start = 0x10 in raw_data
+        has_end = 0x16 in raw_data
+
+        if has_start and has_end:
+            # Contains both markers - light cyan
+            raw_item.setBackground(QtGui.QBrush(QtGui.QColor("#E0F7FA")))
+        elif has_start or has_end:
+            # Contains one marker - light yellow
+            raw_item.setBackground(QtGui.QBrush(QtGui.QColor("#FFF9C4")))
+        # else: no special color (white background)
+
+        self.uartRawTable.setItem(row, 1, raw_item)
+        self.uartRawTable.scrollToBottom()
+
+        # Clear buffer and update timestamp
+        self._uartRawBuffer.clear()
+        self._uartRawLastFlush = time_module.time()
 
     def _onError(self, src: str, msg: str):
         self.appendLog(LogEvent(int(time.time()*1000), src, f"ERROR: {msg}"))
@@ -726,7 +998,11 @@ class MainWindow(QtWidgets.QMainWindow):
     # UART Log Management
     def _onClearUartLog(self):
         self.uartTable.setRowCount(0)
+        self.uartRawTable.setRowCount(0)
         self._uartEvents.clear()
+        self._uartRawEvents.clear()
+        self._uartRawBuffer.clear()
+        self._uartRawLastFlush = 0
         self.statusBar().showMessage("UART log cleared", 2000)
 
     def _onCopyAllUart(self):
@@ -959,6 +1235,105 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(self.uartTable.rowCount()):
             for col in range(self.uartTable.columnCount()):
                 item = self.uartTable.item(row, col)
+                if item:
+                    font = item.font()
+                    font.setBold(False)
+                    item.setFont(font)
+
+    # UART RAW Search functionality
+    def _onUartRawSearchTextChanged(self):
+        """Re-search when text changes."""
+        self._performUartRawSearch()
+
+    def _performUartRawSearch(self):
+        """Perform search and highlight all matches in RAW UART table."""
+        search_text = self.uartRawSearchEdit.text().replace(" ", "").lower()
+        self._uartRawSearchResults.clear()
+        self._uartRawSearchIndex = -1
+
+        if not search_text:
+            # Clear all highlighting
+            for row in range(self.uartRawTable.rowCount()):
+                for col in range(self.uartRawTable.columnCount()):
+                    item = self.uartRawTable.item(row, col)
+                    if item:
+                        # Reset font weight
+                        font = item.font()
+                        font.setBold(False)
+                        item.setFont(font)
+            return
+
+        # Search through all rows
+        for row in range(self.uartRawTable.rowCount()):
+            match_found = False
+            for col in range(self.uartRawTable.columnCount()):
+                item = self.uartRawTable.item(row, col)
+                if item:
+                    # Remove spaces from item text for hex comparison
+                    item_text = item.text().replace(" ", "").lower()
+                    if search_text in item_text:
+                        match_found = True
+                        break
+
+            if match_found:
+                self._uartRawSearchResults.append(row)
+                # Highlight the row with bold text
+                for col in range(self.uartRawTable.columnCount()):
+                    item = self.uartRawTable.item(row, col)
+                    if item:
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+            else:
+                # Remove bold from non-matching rows
+                for col in range(self.uartRawTable.columnCount()):
+                    item = self.uartRawTable.item(row, col)
+                    if item:
+                        font = item.font()
+                        font.setBold(False)
+                        item.setFont(font)
+
+        # Update status
+        if self._uartRawSearchResults:
+            self.statusBar().showMessage(f"Found {len(self._uartRawSearchResults)} matches in UART RAW log", 3000)
+        else:
+            self.statusBar().showMessage("No matches found in UART RAW log", 3000)
+
+    def _onUartRawSearchNext(self):
+        """Navigate to next search result in RAW table."""
+        if not self._uartRawSearchResults:
+            self._performUartRawSearch()
+            if not self._uartRawSearchResults:
+                return
+
+        self._uartRawSearchIndex = (self._uartRawSearchIndex + 1) % len(self._uartRawSearchResults)
+        row = self._uartRawSearchResults[self._uartRawSearchIndex]
+        self.uartRawTable.selectRow(row)
+        self.uartRawTable.scrollToItem(self.uartRawTable.item(row, 0))
+        self.statusBar().showMessage(f"Match {self._uartRawSearchIndex + 1} of {len(self._uartRawSearchResults)}", 2000)
+
+    def _onUartRawSearchPrev(self):
+        """Navigate to previous search result in RAW table."""
+        if not self._uartRawSearchResults:
+            self._performUartRawSearch()
+            if not self._uartRawSearchResults:
+                return
+
+        self._uartRawSearchIndex = (self._uartRawSearchIndex - 1) % len(self._uartRawSearchResults)
+        row = self._uartRawSearchResults[self._uartRawSearchIndex]
+        self.uartRawTable.selectRow(row)
+        self.uartRawTable.scrollToItem(self.uartRawTable.item(row, 0))
+        self.statusBar().showMessage(f"Match {self._uartRawSearchIndex + 1} of {len(self._uartRawSearchResults)}", 2000)
+
+    def _onUartRawSearchClear(self):
+        """Clear search in RAW table."""
+        self.uartRawSearchEdit.clear()
+        self._uartRawSearchResults.clear()
+        self._uartRawSearchIndex = -1
+        # Clear all highlighting
+        for row in range(self.uartRawTable.rowCount()):
+            for col in range(self.uartRawTable.columnCount()):
+                item = self.uartRawTable.item(row, col)
                 if item:
                     font = item.font()
                     font.setBold(False)

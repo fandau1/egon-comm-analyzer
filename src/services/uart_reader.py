@@ -21,6 +21,7 @@ class UartReader(QtCore.QObject):
     closed = QtCore.Signal(str)
     frameReceived = QtCore.Signal(bytes)
     frameDropped = QtCore.Signal(bytes, str)  # dropped frame, reason
+    rawDataReceived = QtCore.Signal(bytes)  # raw data before any parsing
     errorOccurred = QtCore.Signal(str)
 
     def __init__(self, port: str, baudrate: int,
@@ -69,6 +70,9 @@ class UartReader(QtCore.QObject):
                     if not b:
                         continue
                     byte = b[0]
+
+                    # Emit raw data before any parsing
+                    self.rawDataReceived.emit(b)
 
                     if byte == self.start_byte:
                         # START byte - begin new frame
