@@ -1,4 +1,5 @@
 import threading
+import time
 from PySide6 import QtCore
 import serial
 
@@ -67,11 +68,25 @@ class UartReader(QtCore.QObject):
         buf = bytearray()
         in_frame = False
         frame_start_byte = None  # Track which START byte began the current frame
+        frame_start_time = None  # Track when frame started for timeout detection
+        FRAME_TIMEOUT = 0.5  # 500ms timeout for incomplete frames
 
         try:
             while not self._stop.is_set():
                 try:
                     b = self._ser.read(1)
+                    current_time = time.time()
+
+                    # Check for frame timeout - if we're in a frame and too much time passed without END byte
+                    if in_frame and frame_start_time and (current_time - frame_start_time) > FRAME_TIMEOUT:
+                        # Frame timeout - drop incomplete frame
+                        if len(buf) > 0:
+                            self.frameDropped.emit(bytes(buf), "incomplete_frame_interrupted")
+                        buf.clear()
+                        in_frame = False
+                        frame_start_byte = None
+                        frame_start_time = None
+
                     if not b:
                         continue
                     byte = b[0]
@@ -79,55 +94,66 @@ class UartReader(QtCore.QObject):
                     # Emit raw data before any parsing
                     self.rawDataReceived.emit(b)
 
-                    # Check for START bytes (0x10 or 0x43) - BUT ONLY if we're NOT already in a frame
-                    if not in_frame and (byte == self.start_byte or byte == self.start_byte_alt):
-                        # START byte - begin new frame
-                        buf.clear()
-                        buf.append(byte)
-                        in_frame = True
-                        frame_start_byte = byte  # Remember which START byte we used
-
-                    elif byte == self.end_byte and in_frame:
-                        # END byte - complete frame
-                        buf.append(byte)
-                        frame = bytes(buf)
-                        buf.clear()
-                        in_frame = False
-                        frame_start_byte = None
-
-                        # Validate and emit
-                        if 2 <= len(frame) <= self.max_len:
-                            self.frameReceived.emit(frame)
-                        elif len(frame) < 2:
-                            self.frameDropped.emit(frame, "too_short")
-                        else:
-                            self.frameDropped.emit(frame, "too_long")
-
-                    elif in_frame:
-                        # Check if we encountered the SAME start byte again (error - missing END or new frame started)
-                        if byte == frame_start_byte and len(buf) > 1:
-                            # Same START byte found inside frame - this is an error
-                            # Drop the incomplete frame and start a new one
-                            self.frameDropped.emit(bytes(buf), "same_start_byte_in_frame")
+                    # Check for START bytes (0x10 or 0x43)
+                    if byte == self.start_byte or byte == self.start_byte_alt:
+                        if in_frame:
+                            # We're already in a frame and received another START byte
+                            # This means the previous frame was incomplete (missing END byte)
+                            # Drop the incomplete frame and start new one
+                            if len(buf) > 1:  # Only drop if we had some data
+                                self.frameDropped.emit(bytes(buf), "incomplete_frame_interrupted")
+                            # Start new frame
                             buf.clear()
                             buf.append(byte)
                             frame_start_byte = byte
-                            # Stay in_frame = True, we just started a new frame
+                            frame_start_time = current_time
+                            in_frame = True
                         else:
-                            # Normal data byte (or opposite START byte which is allowed)
+                            # Not in frame - start new frame normally
+                            buf.clear()
                             buf.append(byte)
+                            in_frame = True
+                            frame_start_byte = byte
+                            frame_start_time = current_time
 
-                            # Buffer overflow check
-                            if len(buf) > self.max_len:
-                                self.frameDropped.emit(bytes(buf), "buffer_overflow")
-                                buf.clear()
-                                in_frame = False
-                                frame_start_byte = None
+                    elif byte == self.end_byte:
+                        if in_frame:
+                            # END byte - complete frame
+                            buf.append(byte)
+                            frame = bytes(buf)
+                            buf.clear()
+                            in_frame = False
+                            frame_start_byte = None
+                            frame_start_time = None
+
+                            # Validate and emit
+                            if 2 <= len(frame) <= self.max_len:
+                                self.frameReceived.emit(frame)
+                            elif len(frame) < 2:
+                                self.frameDropped.emit(frame, "too_short")
+                            else:
+                                self.frameDropped.emit(frame, "too_long")
+                        # else: END byte outside of frame - ignore it
+
+                    elif in_frame:
+                        # Data byte - add to buffer
+                        buf.append(byte)
+
+                        # Buffer overflow check
+                        if len(buf) > self.max_len:
+                            self.frameDropped.emit(bytes(buf), "buffer_overflow")
+                            buf.clear()
+                            in_frame = False
+                            frame_start_byte = None
+                            frame_start_time = None
 
                 except Exception as e:
                     self.errorOccurred.emit(f"UART read error: {e}")
                     break
         finally:
+            # Drop any incomplete frame at the end
+            if in_frame and len(buf) > 0:
+                self.frameDropped.emit(bytes(buf), "incomplete_frame_interrupted")
             try:
                 self._ser.close()
             except Exception:
