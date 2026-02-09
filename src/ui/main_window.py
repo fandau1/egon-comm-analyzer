@@ -257,13 +257,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stopButton.setEnabled(False)
 
         # Tables (main communication panels)
-        self.tcpTable = QtWidgets.QTableWidget(0, 2)
-        self.tcpTable.setHorizontalHeaderLabels(["Time", "TCP Event"])
+        # TCP Parsed: Time, Direction, CMD, Slave, Parameter, Data
+        self.tcpTable = QtWidgets.QTableWidget(0, 6)
+        self.tcpTable.setHorizontalHeaderLabels([
+            "Time", "Direction", "CMD", "Slave", "Parameter", "Data",
+        ])
         self.tcpTable.horizontalHeader().setStretchLastSection(True)
         self.tcpTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.tcpTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tcpTable.setWordWrap(True)
         self.tcpTable.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        # Volitelné šířky
+        self.tcpTable.setColumnWidth(0, 100)  # Time
+        self.tcpTable.setColumnWidth(1, 70)   # Direction
+        self.tcpTable.setColumnWidth(2, 60)   # CMD
+        self.tcpTable.setColumnWidth(3, 60)   # Slave
+        self.tcpTable.setColumnWidth(4, 220)  # Parameter
+        self.tcpTable.setColumnWidth(5, 360)  # Data
 
         self.uartTable = QtWidgets.QTableWidget(0, 9)
         self.uartTable.setHorizontalHeaderLabels(["Time", "Type", "From", "To", "CMD", "LEN", "Data (Hex)", "Data (String)", "CHK"])
@@ -493,6 +503,10 @@ class MainWindow(QtWidgets.QMainWindow):
             match_type=getattr(config, 'UART_FILTER_MATCH', 'exact'),
             patterns=getattr(config, 'UART_FILTER_HEX_PATTERNS', []),
         )
+        # TCP barvy pro Slave/Parameter
+        self._tcpCmdColors: dict[str, QtGui.QColor] = {}
+        self._tcpSlaveColors: dict[str, QtGui.QColor] = {}
+        self._tcpParamColors: dict[str, QtGui.QColor] = {}
 
         # Wire up
         self.startButton.clicked.connect(self.onStart)
@@ -867,6 +881,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def _onTcpDisconnected(self, reason: str):
         self.appendLog(LogEvent(int(time.time()*1000), "TCP", f"disconnected ({reason})"))
 
+    def _get_color_for_tcp_value(self, cache: dict[str, QtGui.QColor], key: str) -> QtGui.QColor:
+        """Deterministická pastelová barva pro danou hodnotu (Slave/Parameter)."""
+        if key in cache:
+            return cache[key]
+        # Použijeme stejnou paletu jako pro UART ID, ale přes get_color_for_id
+        # Přemapujeme string na pseudo-ID (součet znaků & 0xFF)
+        val = sum(ord(c) for c in key) & 0xFF
+        hex_color = get_color_for_id(val)  # vrací hex string
+        color = QtGui.QColor(hex_color)
+        cache[key] = color
+        return color
+
     def _onTcpDataDir(self, data: bytes, direction: str):
         # Store direction for potential incomplete message flush
         self._tcpRawDirection = direction
@@ -897,9 +923,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 # Direction column
                 dir_item = QtWidgets.QTableWidgetItem(direction)
-                # Color code: RX = green, TX = orange
-                dir_color = QtGui.QColor("#e7f7e7") if direction.upper() == "RX" else QtGui.QColor("#ffe9e6")
-                dir_item.setBackground(QtGui.QBrush(dir_color))
+                # Color code: RX = green, TX = red
+                dir_color_raw = QtGui.QColor("#E3F7E0") if direction.upper() == "RX" else QtGui.QColor("#FDE0E0")
+                dir_item.setBackground(QtGui.QBrush(dir_color_raw))
                 self.tcpRawTable.setItem(row, 1, dir_item)
 
                 # Raw data column - decode as ASCII if possible
@@ -912,25 +938,94 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tcpRawTable.setItem(row, 2, raw_item)
                 self.tcpRawTable.scrollToBottom()
 
-        # Process parsed data
-        rec = parse_tcp_message(data)
-        ts_ms = int(time.time() * 1000)
-        if rec is not None:
-            seg_count = len(rec.segments)
-            header = f"M={rec.m or ''} S={rec.s or ''} P={rec.p or ''}"
-            segments_full = ", ".join(f"{sid}:{sval}" for sid, sval in rec.segments.items())
-            msg = f"{direction} | TCP parsed: {header} | D={(' | ' + segments_full) if segments_full else ''}"
-        else:
-            msg = f"{direction} | {len(data)} bytes: {data}"
-        ev = LogEvent(ts_ms, "TCP", msg)
-        # append and colorize row
-        prev_rows = self.tcpTable.rowCount()
-        self.appendLog(ev)
-        color = QtGui.QColor("#e7f7e7") if direction.upper() == "RX" else QtGui.QColor("#ffe9e6")
-        for col in range(self.tcpTable.columnCount()):
-            item = self.tcpTable.item(prev_rows, col)
-            if item:
-                item.setBackground(QtGui.QBrush(color))
+                # Parsed view
+                rec = parse_tcp_message(message)
+                parsed_msg = rec if rec is not None else None
+
+                # Vytvorit log event pro Parsed tab (message text pro kopirovani)
+                try:
+                    msg_text = message.decode('ascii', errors='ignore')
+                except Exception:
+                    msg_text = repr(message)
+
+
+                ev = LogEvent(ts_ms, "TCP", msg_text)
+                self._tcpEvents.append(ev)
+
+                # Přidat řádek do Parsed tabulky
+                row_p = self.tcpTable.rowCount()
+                self.tcpTable.insertRow(row_p)
+
+                # Time (bílé pozadí)
+                time_item_p = QtWidgets.QTableWidgetItem(self._fmt_ts(ts_ms))
+                self.tcpTable.setItem(row_p, 0, time_item_p)
+
+                # Direction – RX zelená, TX červená
+                dir_item_p = QtWidgets.QTableWidgetItem(direction)
+                dir_color_p = QtGui.QColor("#E3F7E0") if direction.upper() == "RX" else QtGui.QColor("#FDE0E0")
+                dir_item_p.setBackground(QtGui.QBrush(dir_color_p))
+                self.tcpTable.setItem(row_p, 1, dir_item_p)
+
+                # Výchozí bílé pozadí pro ostatní sloupce
+                base_bg = QtGui.QColor("#FFFFFF")
+
+                if parsed_msg is not None:
+                    # CMD – jednobarevný sloupec (světle šedý background)
+                    cmd_item = QtWidgets.QTableWidgetItem(parsed_msg.cmd or "-")
+                    if parsed_msg.cmd:
+                        random_color = self._get_color_for_tcp_value(self._tcpCmdColors, parsed_msg.cmd)
+                        cmd_item.setBackground(QtGui.QBrush(random_color))
+                    else:
+                        cmd_item.setBackground(QtGui.QBrush(base_bg))
+                    self.tcpTable.setItem(row_p, 2, cmd_item)
+
+                    # Slave – stejná barva pro stejnou hodnotu, prázdné bílé
+                    slave_text = parsed_msg.slave or "-"
+                    slave_item = QtWidgets.QTableWidgetItem(slave_text)
+                    if parsed_msg.slave:
+                        slave_color = self._get_color_for_tcp_value(self._tcpSlaveColors, parsed_msg.slave)
+                        slave_item.setBackground(QtGui.QBrush(slave_color))
+                    else:
+                        slave_item.setBackground(QtGui.QBrush(base_bg))
+                    self.tcpTable.setItem(row_p, 3, slave_item)
+
+                    # Parameter – stejná logika jako Slave
+                    param_text = parsed_msg.parameter or "-"
+                    param_item = QtWidgets.QTableWidgetItem(param_text)
+                    if parsed_msg.parameter:
+                        param_color = self._get_color_for_tcp_value(self._tcpParamColors, parsed_msg.parameter)
+                        param_item.setBackground(QtGui.QBrush(param_color))
+                    else:
+                        param_item.setBackground(QtGui.QBrush(base_bg))
+                    self.tcpTable.setItem(row_p, 4, param_item)
+
+                    # Data – pokud je vyplněno, bílé pozadí, jinak taky bílé a text "-"
+                    data_text = parsed_msg.data or "-"
+                    data_item = QtWidgets.QTableWidgetItem(data_text)
+                    data_item.setBackground(QtGui.QBrush(base_bg))
+                    self.tcpTable.setItem(row_p, 5, data_item)
+                else:
+                    # Nepodařilo se zparsovat – vše do Data sloupce, ostatní bílé
+                    cmd_item = QtWidgets.QTableWidgetItem("-")
+                    cmd_item.setBackground(QtGui.QBrush(QtGui.QColor("#F5F5F5")))
+                    self.tcpTable.setItem(row_p, 2, cmd_item)
+
+                    slave_item = QtWidgets.QTableWidgetItem("-")
+                    slave_item.setBackground(QtGui.QBrush(base_bg))
+                    self.tcpTable.setItem(row_p, 3, slave_item)
+
+                    param_item = QtWidgets.QTableWidgetItem("-")
+                    param_item.setBackground(QtGui.QBrush(base_bg))
+                    self.tcpTable.setItem(row_p, 4, param_item)
+
+                    data_item = QtWidgets.QTableWidgetItem(msg_text.strip())
+                    data_item.setBackground(QtGui.QBrush(base_bg))
+                    self.tcpTable.setItem(row_p, 5, data_item)
+
+                self.tcpTable.scrollToBottom()
+
+        # Zbytek dat v _tcpRawBuffer necháváme pro případný další příjem
+        # self._tcpRawBuffer.clear()  # NE, nechceme mazat, dokud neskončí spojení
 
     def _onUartFrame(self, frame: bytes):
         if not self._uartFilter.passes(frame):
@@ -948,7 +1043,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "too_short": "příliš krátká",
             "too_long": "příliš dlouhá",
             "buffer_overflow": "přetečení bufferu",
-            "incomplete_frame_interrupted": "nekompletní frame přerušen",
+            "incomplete_frame_interrupted": "nekompletní frame přerušен",
             "same_start_byte_in_frame": "stejný START byte uvnitř zprávy"
         }
         reason_text = reason_map.get(reason, reason)
