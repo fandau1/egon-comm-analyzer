@@ -265,8 +265,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpTable.setWordWrap(True)
         self.tcpTable.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
 
-        self.uartTable = QtWidgets.QTableWidget(0, 7)
-        self.uartTable.setHorizontalHeaderLabels(["Time", "Type", "From", "To", "Data (Hex)", "Data (String)", "CHK"])
+        self.uartTable = QtWidgets.QTableWidget(0, 9)
+        self.uartTable.setHorizontalHeaderLabels(["Time", "Type", "From", "To", "CMD", "LEN", "Data (Hex)", "Data (String)", "CHK"])
         self.uartTable.horizontalHeader().setStretchLastSection(True)
         self.uartTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.uartTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -277,9 +277,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartTable.setColumnWidth(1, 50)   # Type
         self.uartTable.setColumnWidth(2, 60)   # From
         self.uartTable.setColumnWidth(3, 60)   # To
-        self.uartTable.setColumnWidth(4, 200)  # Data (Hex)
-        self.uartTable.setColumnWidth(5, 200)  # Data (String)
-        self.uartTable.setColumnWidth(6, 70)   # CHK
+        self.uartTable.setColumnWidth(4, 60)   # CMD
+        self.uartTable.setColumnWidth(5, 50)   # LEN
+        self.uartTable.setColumnWidth(6, 200)  # Data (Hex)
+        self.uartTable.setColumnWidth(7, 200)  # Data (String)
+        self.uartTable.setColumnWidth(8, 70)   # CHK
 
         # Top bar restructured into two compact rows
         topBar = QtWidgets.QWidget()
@@ -642,10 +644,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.uartTable.setItem(row, 1, type_item)
 
             # Check for SAME start byte in data (warning sign)
-            # 0x43 is allowed in control (0x10) messages, 0x10 is allowed in data (0x43) messages
-            # Only warn if the data contains the SAME start byte that begins the frame
+            # For 0x43 messages with length field, this should NOT happen anymore
             start_byte = parsed.raw[0]
-            has_start_in_data = start_byte in parsed.data
+            has_start_in_data = start_byte in parsed.data if parsed.message_type == "control" else False
 
             # From column (sender ID)
             from_item = QtWidgets.QTableWidgetItem(f"0x{parsed.sender_id:02X}")
@@ -659,21 +660,46 @@ class MainWindow(QtWidgets.QMainWindow):
             to_item.setBackground(QtGui.QBrush(QtGui.QColor(to_color)))
             self.uartTable.setItem(row, 3, to_item)
 
-            # Data (Hex) column - add warning if contains START bytes
-            hex_text = parsed.data.hex()
+            # CMD column (only for 0x43 messages)
+            if parsed.command is not None:
+                cmd_item = QtWidgets.QTableWidgetItem(f"0x{parsed.command:02X}")
+                cmd_item.setBackground(QtGui.QBrush(QtGui.QColor("#E8F5E9")))  # Light green
+                self.uartTable.setItem(row, 4, cmd_item)
+            else:
+                # Empty for control messages
+                self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem("-"))
+
+            # LEN column (only for 0x43 messages)
+            if parsed.data_length is not None:
+                len_item = QtWidgets.QTableWidgetItem(str(parsed.data_length))
+                len_item.setBackground(QtGui.QBrush(QtGui.QColor("#E8F5E9")))  # Light green
+                # Add tooltip showing if length matches actual data
+                actual_len = len(parsed.data)
+                if actual_len == parsed.data_length:
+                    len_item.setToolTip(f"Length matches: {actual_len} bytes")
+                else:
+                    len_item.setToolTip(f"⚠ Length mismatch! Expected: {parsed.data_length}, Actual: {actual_len}")
+                    len_item.setBackground(QtGui.QBrush(QtGui.QColor("#FFE4B5")))  # Warning color
+                self.uartTable.setItem(row, 5, len_item)
+            else:
+                # Empty for control messages
+                self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem("-"))
+
+            # Data (Hex) column - add warning if contains START bytes (only for control messages)
+            hex_text = parsed.data.hex().upper()
             if has_start_in_data:
                 hex_text += " ⚠"
             hex_item = QtWidgets.QTableWidgetItem(hex_text)
             if has_start_in_data:
                 hex_item.setBackground(QtGui.QBrush(QtGui.QColor("#FFE4B5")))  # Moccasin - warning
-            self.uartTable.setItem(row, 4, hex_item)
+            self.uartTable.setItem(row, 6, hex_item)
 
             # Data (String) column
             string_text = parsed.data_as_string()
             if has_start_in_data:
                 string_text += f" (contains 0x{start_byte:02X})"
             string_item = QtWidgets.QTableWidgetItem(string_text)
-            self.uartTable.setItem(row, 5, string_item)
+            self.uartTable.setItem(row, 7, string_item)
 
             # Checksum column with validation indicator
             chk_text = f"0x{parsed.checksum:02X}"
@@ -686,10 +712,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 chk_text += " ✗"
                 chk_item = QtWidgets.QTableWidgetItem(chk_text)
                 chk_item.setBackground(QtGui.QBrush(QtGui.QColor("#F8D7DA")))  # Light red
-            self.uartTable.setItem(row, 6, chk_item)
+            self.uartTable.setItem(row, 8, chk_item)
         else:
-            # ...existing code...
-
             # Unparsed message - detect the problem
             start_ok = (frame[0] == 0x10 or frame[0] == 0x43) if len(frame) > 0 else False
             end_ok = frame[-1] == 0x16 if len(frame) > 0 else False
@@ -703,13 +727,15 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 problem = "⚠ nevalidní formát"
 
-            # Show raw data with error indication
+            # Show raw data with error indication (now 9 columns)
             self.uartTable.setItem(row, 1, QtWidgets.QTableWidgetItem("?"))
             self.uartTable.setItem(row, 2, QtWidgets.QTableWidgetItem("?"))
             self.uartTable.setItem(row, 3, QtWidgets.QTableWidgetItem("?"))
-            self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem(frame.hex()))
-            self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem(problem))
-            self.uartTable.setItem(row, 6, QtWidgets.QTableWidgetItem("?"))
+            self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem("?"))
+            self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem("?"))
+            self.uartTable.setItem(row, 6, QtWidgets.QTableWidgetItem(frame.hex()))
+            self.uartTable.setItem(row, 7, QtWidgets.QTableWidgetItem(problem))
+            self.uartTable.setItem(row, 8, QtWidgets.QTableWidgetItem("?"))
 
             # Color row yellow to indicate parse error
             warning_color = QtGui.QColor("#FFF4CC")  # Light yellow
@@ -908,13 +934,15 @@ class MainWindow(QtWidgets.QMainWindow):
         time_item = QtWidgets.QTableWidgetItem(self._fmt_ts(ts))
         self.uartTable.setItem(row, 0, time_item)
 
-        # Mark all data columns as invalid (7 columns now: Time, Type, From, To, Data(Hex), Data(String), CHK)
+        # Mark all data columns as invalid (9 columns now: Time, Type, From, To, CMD, LEN, Data(Hex), Data(String), CHK)
         self.uartTable.setItem(row, 1, QtWidgets.QTableWidgetItem("✗"))
         self.uartTable.setItem(row, 2, QtWidgets.QTableWidgetItem("✗"))
         self.uartTable.setItem(row, 3, QtWidgets.QTableWidgetItem("✗"))
-        self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem(frame.hex()))
-        self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem(f"⚠ {reason_text}"))
-        self.uartTable.setItem(row, 6, QtWidgets.QTableWidgetItem("✗"))
+        self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem("✗"))
+        self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem("✗"))
+        self.uartTable.setItem(row, 6, QtWidgets.QTableWidgetItem(frame.hex()))
+        self.uartTable.setItem(row, 7, QtWidgets.QTableWidgetItem(f"⚠ {reason_text}"))
+        self.uartTable.setItem(row, 8, QtWidgets.QTableWidgetItem("✗"))
 
         # Color the entire row red to indicate error
         error_color = QtGui.QColor("#FFD6D6")  # Light red

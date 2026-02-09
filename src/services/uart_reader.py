@@ -5,21 +5,30 @@ import serial
 
 class UartReader(QtCore.QObject):
     """
-    UART frame reader with simple START/END detection.
+    UART frame reader with START/END detection and length-based parsing for 0x43 messages.
 
     Protocol:
-    - START bytes: 0x10 (short/control messages) or 0x43 (data messages)
+    - START bytes: 0x10 (control messages) or 0x43 (data messages with length)
     - END byte: 0x16 - marks end of frame
 
     Frame formats:
-    - 10 [data...] 16 - short/control frames
-    - 43 [data...] 16 - data frames
+    1. Control (0x10): 10 DST SRC <data> CHK 16
+       - Variable length data
+       - Frame ends when 0x16 is encountered
 
-    Simple parsing:
-    - 0x10 or 0x43 starts new frame (discards incomplete previous frame)
-    - 0x16 ends current frame
-    - No escaping/stuffing
-    - Same checksum (SUM8) for both types
+    2. Data (0x43): 43 DST SRC CMD LEN <data[LEN]> CHK 16
+       - Fixed length data determined by LEN field
+       - Frame length calculated from LEN field
+       - Allows 0x10, 0x43, 0x16 in data without confusion
+       - Frame ends after exact number of bytes specified by LEN
+
+    Parsing logic:
+    - 0x10: Collect bytes until 0x16 (END byte)
+    - 0x43: Read LEN at position 4, collect exactly LEN bytes, verify 0x16 at end
+
+    Checksum (SUM8):
+    - 0x10: (DST + SRC + sum(data)) & 0xFF
+    - 0x43: (DST + SRC + CMD + LEN + sum(data)) & 0xFF
     """
     opened = QtCore.Signal(str)  # port
     closed = QtCore.Signal(str)
@@ -69,6 +78,7 @@ class UartReader(QtCore.QObject):
         in_frame = False
         frame_start_byte = None  # Track which START byte began the current frame
         frame_start_time = None  # Track when frame started for timeout detection
+        expected_frame_length = None  # For 0x43 messages with LEN field
         FRAME_TIMEOUT = 0.5  # 500ms timeout for incomplete frames
 
         try:
@@ -86,6 +96,7 @@ class UartReader(QtCore.QObject):
                         in_frame = False
                         frame_start_byte = None
                         frame_start_time = None
+                        expected_frame_length = None
 
                     if not b:
                         continue
@@ -108,6 +119,7 @@ class UartReader(QtCore.QObject):
                             frame_start_byte = byte
                             frame_start_time = current_time
                             in_frame = True
+                            expected_frame_length = None  # Will be determined later
                         else:
                             # Not in frame - start new frame normally
                             buf.clear()
@@ -115,16 +127,50 @@ class UartReader(QtCore.QObject):
                             in_frame = True
                             frame_start_byte = byte
                             frame_start_time = current_time
+                            expected_frame_length = None
 
-                    elif byte == self.end_byte:
-                        if in_frame:
-                            # END byte - complete frame
-                            buf.append(byte)
+                    elif in_frame:
+                        # We're in a frame - add byte to buffer
+                        buf.append(byte)
+
+                        # For 0x43 messages: determine expected length after reading LEN field
+                        if frame_start_byte == 0x43 and expected_frame_length is None and len(buf) >= 5:
+                            # buf[0]=0x43, buf[1]=DST, buf[2]=SRC, buf[3]=CMD, buf[4]=LEN
+                            data_length = buf[4]
+                            # Expected total: 1(start) + 1(dst) + 1(src) + 1(cmd) + 1(len) + data_length + 1(chk) + 1(end)
+                            expected_frame_length = 7 + data_length
+
+                        # Check if frame is complete
+                        frame_complete = False
+
+                        if frame_start_byte == 0x43 and expected_frame_length is not None:
+                            # For 0x43: frame is complete when we reach expected length
+                            if len(buf) == expected_frame_length:
+                                # Verify last byte is END byte
+                                if buf[-1] == self.end_byte:
+                                    frame_complete = True
+                                else:
+                                    # Expected END byte but got something else - frame error
+                                    self.frameDropped.emit(bytes(buf), "missing_end_byte")
+                                    buf.clear()
+                                    in_frame = False
+                                    frame_start_byte = None
+                                    frame_start_time = None
+                                    expected_frame_length = None
+                                    continue
+                        elif frame_start_byte == 0x10:
+                            # For 0x10: frame is complete when we see END byte
+                            if byte == self.end_byte:
+                                frame_complete = True
+
+                        if frame_complete:
+                            # Frame is complete
                             frame = bytes(buf)
                             buf.clear()
                             in_frame = False
                             frame_start_byte = None
                             frame_start_time = None
+                            expected_frame_length = None
 
                             # Validate and emit
                             if 2 <= len(frame) <= self.max_len:
@@ -133,19 +179,15 @@ class UartReader(QtCore.QObject):
                                 self.frameDropped.emit(frame, "too_short")
                             else:
                                 self.frameDropped.emit(frame, "too_long")
-                        # else: END byte outside of frame - ignore it
-
-                    elif in_frame:
-                        # Data byte - add to buffer
-                        buf.append(byte)
 
                         # Buffer overflow check
-                        if len(buf) > self.max_len:
+                        elif len(buf) > self.max_len:
                             self.frameDropped.emit(bytes(buf), "buffer_overflow")
                             buf.clear()
                             in_frame = False
                             frame_start_byte = None
                             frame_start_time = None
+                            expected_frame_length = None
 
                 except Exception as e:
                     self.errorOccurred.emit(f"UART read error: {e}")

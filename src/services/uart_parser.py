@@ -1,11 +1,18 @@
 """
-UART message parser for format:
-- 10 (start) + sender_id + receiver_id + data + checksum + 16 (end)  [short/control messages]
-- 43 (start) + sender_id + receiver_id + data + checksum + 16 (end)  [data messages]
+UART message parser for formats:
+- 0x10 (start) + DST + SRC + data + CHK + 0x16 (end)  [short/control messages]
+- 0x43 (start) + DST + SRC + CMD + LEN + data[LEN] + CHK + 0x16 (end)  [data messages with length]
 
-Uses 8-bit SUM checksum: (DST + SRC + all_data_bytes) & 0xFF
+where:
+  DST = destination/receiver ID (1 byte)
+  SRC = sender ID (1 byte)
+  CMD = command (1 byte, only in 0x43 messages)
+  LEN = length of data field (1 byte, only in 0x43 messages)
+  CHK = checksum (1 byte)
 
-Simple protocol - no escaping.
+Checksum calculation:
+- 0x10 messages: (DST + SRC + all_data_bytes) & 0xFF
+- 0x43 messages: (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -21,12 +28,16 @@ class UartMessage:
     raw: bytes
     checksum_valid: bool
     message_type: str  # "control" (0x10) or "data" (0x43)
+    command: Optional[int] = None  # Only for 0x43 messages
+    data_length: Optional[int] = None  # Only for 0x43 messages
 
     def __str__(self) -> str:
         """String representation of the message."""
         chk_status = "✓" if self.checksum_valid else "✗"
         type_marker = "C" if self.message_type == "control" else "D"
-        return f"[{type_marker}:{self.sender_id:02X}→{self.receiver_id:02X}] {self.data.hex()} CHK:{chk_status}"
+        cmd_str = f" CMD:{self.command:02X}" if self.command is not None else ""
+        len_str = f" LEN:{self.data_length}" if self.data_length is not None else ""
+        return f"[{type_marker}:{self.sender_id:02X}→{self.receiver_id:02X}{cmd_str}{len_str}] {self.data.hex()} CHK:{chk_status}"
 
     def data_as_string(self) -> str:
         """Try to decode data as ASCII string, fallback to hex."""
@@ -39,13 +50,19 @@ class UartMessage:
 
 def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
     """
-    Parse UART message in format:
-    - 10 DST SRC <data> CHK 16  [control message]
-    - 43 DST SRC <data> CHK 16  [data message]
+    Parse UART message in one of two formats:
+
+    Format 1 (0x10 - control):
+        10 DST SRC <data> CHK 16
+
+    Format 2 (0x43 - data with length):
+        43 DST SRC CMD LEN <data[LEN]> CHK 16
 
     where DST = receiver ID, SRC = sender ID, CHK = checksum (8-bit SUM)
 
-    Checksum = (DST + SRC + all_data_bytes) & 0xFF
+    Checksum:
+    - 0x10: (DST + SRC + all_data_bytes) & 0xFF
+    - 0x43: (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
 
     Args:
         frame: Raw frame bytes
@@ -62,32 +79,76 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
     if start_byte not in (0x10, 0x43) or frame[-1] != 0x16:
         return None
 
-    # Determine message type
-    message_type = "control" if start_byte == 0x10 else "data"
-
-    # Extract sender and receiver IDs
-    receiver_id = frame[1]  # DST
-    sender_id = frame[2]    # SRC
-
     # Extract checksum (second to last byte)
     checksum = frame[-2]
 
-    # Extract data (everything between SRC and checksum)
-    data = frame[3:-2]
+    if start_byte == 0x10:
+        # Format 1: 10 DST SRC <data> CHK 16
+        # Minimum length: 5 (10 DST SRC CHK 16)
 
-    # Calculate expected checksum: (DST + SRC + all_data_bytes) & 0xFF
-    expected_checksum = (receiver_id + sender_id + sum(data)) & 0xFF
-    checksum_valid = (checksum == expected_checksum)
+        receiver_id = frame[1]  # DST
+        sender_id = frame[2]    # SRC
 
-    return UartMessage(
-        sender_id=sender_id,
-        receiver_id=receiver_id,
-        data=data,
-        checksum=checksum,
-        raw=frame,
-        checksum_valid=checksum_valid,
-        message_type=message_type
-    )
+        # Extract data (everything between SRC and checksum)
+        data = frame[3:-2]
+
+        # Calculate expected checksum: (DST + SRC + all_data_bytes) & 0xFF
+        expected_checksum = (receiver_id + sender_id + sum(data)) & 0xFF
+        checksum_valid = (checksum == expected_checksum)
+
+        return UartMessage(
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            data=data,
+            checksum=checksum,
+            raw=frame,
+            checksum_valid=checksum_valid,
+            message_type="control",
+            command=None,
+            data_length=None
+        )
+
+    else:  # start_byte == 0x43
+        # Format 2: 43 DST SRC CMD LEN <data[LEN]> CHK 16
+        # Minimum length: 7 (43 DST SRC CMD LEN CHK 16 - with LEN=0)
+
+        if len(frame) < 7:
+            return None
+
+        receiver_id = frame[1]  # DST
+        sender_id = frame[2]    # SRC
+        command = frame[3]      # CMD
+        data_length = frame[4]  # LEN
+
+        # Calculate expected frame length: 1(start) + 1(dst) + 1(src) + 1(cmd) + 1(len) + data_length + 1(chk) + 1(end)
+        expected_frame_length = 7 + data_length
+
+        # Validate frame length matches the LEN field
+        if len(frame) != expected_frame_length:
+            return None
+
+        # Extract data (LEN bytes starting at position 5)
+        data = frame[5:5+data_length]
+
+        # Verify we extracted correct amount of data
+        if len(data) != data_length:
+            return None
+
+        # Calculate expected checksum: (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
+        expected_checksum = (receiver_id + sender_id + command + data_length + sum(data)) & 0xFF
+        checksum_valid = (checksum == expected_checksum)
+
+        return UartMessage(
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            data=data,
+            checksum=checksum,
+            raw=frame,
+            checksum_valid=checksum_valid,
+            message_type="data",
+            command=command,
+            data_length=data_length
+        )
 
 
 # Color palette for different IDs (using pastel colors for better readability)
