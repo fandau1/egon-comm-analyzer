@@ -1,17 +1,17 @@
 """
 UART message parser for formats:
-- 0x10 (start) + DST + SRC + data + CHK + 0x16 (end)  [short/control messages]
+- 0x10 (start) + DST + SRC + CMD + CHK + 0x16 (end)  [short/control messages]
 - 0x43 (start) + DST + SRC + CMD + LEN + data[LEN] + CHK + 0x16 (end)  [data messages with length]
 
 where:
   DST = destination/receiver ID (1 byte)
   SRC = sender ID (1 byte)
-  CMD = command (1 byte, only in 0x43 messages)
+  CMD = command (1 byte)
   LEN = length of data field (1 byte, only in 0x43 messages)
   CHK = checksum (1 byte)
 
 Checksum calculation:
-- 0x10 messages: (DST + SRC + all_data_bytes) & 0xFF
+- 0x10 messages: (DST + SRC + CMD) & 0xFF
 - 0x43 messages: (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
 """
 from dataclasses import dataclass
@@ -28,7 +28,7 @@ class UartMessage:
     raw: bytes
     checksum_valid: bool
     message_type: str  # "control" (0x10) or "data" (0x43)
-    command: Optional[int] = None  # Only for 0x43 messages
+    command: Optional[int] = None  # For 0x10 and 0x43 messages
     data_length: Optional[int] = None  # Only for 0x43 messages
 
     def __str__(self) -> str:
@@ -49,29 +49,9 @@ class UartMessage:
 
 
 def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
-    """
-    Parse UART message in one of two formats:
+    """Parse UART message according to supported formats."""
 
-    Format 1 (0x10 - control):
-        10 DST SRC <data> CHK 16
-
-    Format 2 (0x43 - data with length):
-        43 DST SRC CMD LEN <data[LEN]> CHK 16
-
-    where DST = receiver ID, SRC = sender ID, CHK = checksum (8-bit SUM)
-
-    Checksum:
-    - 0x10: (DST + SRC + all_data_bytes) & 0xFF
-    - 0x43: (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
-
-    Args:
-        frame: Raw frame bytes
-
-    Returns:
-        UartMessage if valid format, None otherwise
-    """
-
-    if len(frame) < 5:  # Minimum: START DST SRC CHK END
+    if len(frame) < 5:  # Minimum: START DST SRC CHK END (for 0x10 without CMD, but we now expect 6 bytes)
         return None
 
     # Check start and end bytes
@@ -83,17 +63,19 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
     checksum = frame[-2]
 
     if start_byte == 0x10:
-        # Format 1: 10 DST SRC <data> CHK 16
-        # Minimum length: 5 (10 DST SRC CHK 16)
+        # New Format 1: 10 DST SRC CMD CHK 16
+        # Exact length must be 6 bytes
+        if len(frame) != 6:
+            return None
 
         receiver_id = frame[1]  # DST
         sender_id = frame[2]    # SRC
+        command = frame[3]      # CMD
 
-        # Extract data (everything between SRC and checksum)
-        data = frame[3:-2]
+        data = b""  # No data payload for control messages
 
-        # Calculate expected checksum: (DST + SRC + all_data_bytes) & 0xFF
-        expected_checksum = (receiver_id + sender_id + sum(data)) & 0xFF
+        # Calculate expected checksum: (DST + SRC + CMD) & 0xFF
+        expected_checksum = (receiver_id + sender_id + command) & 0xFF
         checksum_valid = (checksum == expected_checksum)
 
         return UartMessage(
@@ -104,8 +86,8 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
             raw=frame,
             checksum_valid=checksum_valid,
             message_type="control",
-            command=None,
-            data_length=None
+            command=command,
+            data_length=None,
         )
 
     else:  # start_byte == 0x43
@@ -170,4 +152,3 @@ ID_COLORS = [
 def get_color_for_id(id_value: int) -> str:
     """Get consistent color for a given ID."""
     return ID_COLORS[id_value % len(ID_COLORS)]
-
