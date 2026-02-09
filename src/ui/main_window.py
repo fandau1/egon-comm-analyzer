@@ -387,7 +387,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tcpButtonsLayout = QtWidgets.QHBoxLayout()
         self.tcpClearButton = QtWidgets.QPushButton("Clear Log")
         self.tcpCopyAllButton = QtWidgets.QPushButton("Copy All")
-        self.tcpCopyRawButton = QtWidgets.QPushButton("Copy Raw")
+        self.tcpCopyRawButton = QtWidgets.QPushButton("Copy Row")
         tcpButtonsLayout.addWidget(self.tcpClearButton)
         tcpButtonsLayout.addWidget(self.tcpCopyAllButton)
         tcpButtonsLayout.addWidget(self.tcpCopyRawButton)
@@ -458,7 +458,7 @@ class MainWindow(QtWidgets.QMainWindow):
         uartButtonsLayout = QtWidgets.QHBoxLayout()
         self.uartClearButton = QtWidgets.QPushButton("Clear Log")
         self.uartCopyAllButton = QtWidgets.QPushButton("Copy All")
-        self.uartCopyRawButton = QtWidgets.QPushButton("Copy Raw")
+        self.uartCopyRawButton = QtWidgets.QPushButton("Copy Row")
         uartButtonsLayout.addWidget(self.uartClearButton)
         uartButtonsLayout.addWidget(self.uartCopyAllButton)
         uartButtonsLayout.addWidget(self.uartCopyRawButton)
@@ -1127,89 +1127,164 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # TCP Log Management
     def _onClearTcpLog(self):
-        self.tcpTable.setRowCount(0)
-        self.tcpRawTable.setRowCount(0)
-        self._tcpEvents.clear()
-        self._tcpRawEvents.clear()
-        self._tcpRawBuffer.clear()
-        self._tcpRawDirection = ""
-        self.statusBar().showMessage("TCP log cleared", 2000)
+        """Clear TCP log based on active tab."""
+        current_tab = self.tcpTabWidget.currentIndex()
+
+        if current_tab == 0:  # Parsed tab
+            self.tcpTable.setRowCount(0)
+            self._tcpEvents.clear()
+            self.statusBar().showMessage("TCP parsed log cleared", 2000)
+        else:  # RAW tab
+            self.tcpRawTable.setRowCount(0)
+            self._tcpRawEvents.clear()
+            self._tcpRawBuffer.clear()
+            self._tcpRawDirection = ""
+            self.statusBar().showMessage("TCP RAW log cleared", 2000)
 
     def _onCopyAllTcp(self):
-        """Copy all TCP log entries to clipboard."""
-        lines = []
-        for ev in self._tcpEvents:
-            lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}")
-        text = "\n".join(lines)
-        QtWidgets.QApplication.clipboard().setText(text)
-        self.statusBar().showMessage(f"Copied {len(self._tcpEvents)} TCP entries to clipboard", 2000)
+        """Copy all TCP log entries to clipboard based on active tab."""
+        current_tab = self.tcpTabWidget.currentIndex()
+
+        if current_tab == 0:  # Parsed tab
+            lines = []
+            for ev in self._tcpEvents:
+                lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}")
+            text = "\n".join(lines)
+            QtWidgets.QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(f"Copied {len(self._tcpEvents)} TCP parsed entries to clipboard", 2000)
+        else:  # RAW tab
+            lines = []
+            for row in range(self.tcpRawTable.rowCount()):
+                time_item = self.tcpRawTable.item(row, 0)
+                dir_item = self.tcpRawTable.item(row, 1)
+                data_item = self.tcpRawTable.item(row, 2)
+                if time_item and dir_item and data_item:
+                    lines.append(f"{time_item.text()} | {dir_item.text()} | {data_item.text()}")
+            text = "\n".join(lines)
+            QtWidgets.QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(f"Copied {len(lines)} TCP RAW entries to clipboard", 2000)
 
     def _onCopyRawTcp(self):
-        """Copy selected TCP entry as raw data."""
-        selected = self.tcpTable.selectionModel().selectedRows()
-        if not selected:
-            self.statusBar().showMessage("No TCP entry selected", 2000)
-            return
-        row = selected[0].row()
-        if row < 0 or row >= len(self._tcpEvents):
-            return
-        ev = self._tcpEvents[row]
-        # Copy the raw message
-        QtWidgets.QApplication.clipboard().setText(ev.message)
-        self.statusBar().showMessage(f"Copied raw TCP entry to clipboard", 2000)
+        """Copy selected TCP row based on active tab."""
+        current_tab = self.tcpTabWidget.currentIndex()
+
+        if current_tab == 0:  # Parsed tab
+            selected = self.tcpTable.selectionModel().selectedRows()
+            if not selected:
+                self.statusBar().showMessage("No TCP entry selected", 2000)
+                return
+            row = selected[0].row()
+            if row < 0 or row >= len(self._tcpEvents):
+                return
+            ev = self._tcpEvents[row]
+            # Copy the raw message
+            QtWidgets.QApplication.clipboard().setText(ev.message)
+            self.statusBar().showMessage(f"Copied TCP parsed entry to clipboard", 2000)
+        else:  # RAW tab
+            selected = self.tcpRawTable.selectionModel().selectedRows()
+            if not selected:
+                self.statusBar().showMessage("No TCP RAW entry selected", 2000)
+                return
+            row = selected[0].row()
+            if row < 0 or row >= self.tcpRawTable.rowCount():
+                return
+
+            # Copy the raw data from the selected row
+            data_item = self.tcpRawTable.item(row, 2)
+            if data_item:
+                QtWidgets.QApplication.clipboard().setText(data_item.text())
+                self.statusBar().showMessage(f"Copied TCP RAW entry to clipboard", 2000)
 
     # UART Log Management
     def _onClearUartLog(self):
-        self.uartTable.setRowCount(0)
-        self.uartRawTable.setRowCount(0)
-        self._uartEvents.clear()
-        self._uartRawEvents.clear()
-        self._uartRawBuffer.clear()
-        self._uartRawLastFlush = 0
-        self.statusBar().showMessage("UART log cleared", 2000)
+        """Clear UART log based on active tab."""
+        current_tab = self.uartTabWidget.currentIndex()
+
+        if current_tab == 0:  # Parsed tab
+            self.uartTable.setRowCount(0)
+            self._uartEvents.clear()
+            self.statusBar().showMessage("UART parsed log cleared", 2000)
+        else:  # RAW tab
+            self.uartRawTable.setRowCount(0)
+            self._uartRawEvents.clear()
+            self._uartRawBuffer.clear()
+            self._uartRawLastFlush = 0
+            self.statusBar().showMessage("UART RAW log cleared", 2000)
 
     def _onCopyAllUart(self):
-        """Copy all UART log entries to clipboard with checksum validation status."""
-        lines = []
-        for ev in self._uartEvents:
-            # Try to parse the frame to get checksum status
-            chk_status = ""
-            if ev.raw_data:
-                parsed = parse_uart_message(ev.raw_data)
-                if parsed:
-                    chk_status = " | CHK: ✓" if parsed.checksum_valid else " | CHK: ✗"
+        """Copy all UART log entries to clipboard based on active tab."""
+        current_tab = self.uartTabWidget.currentIndex()
 
-            lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}{chk_status}")
-        text = "\n".join(lines)
-        QtWidgets.QApplication.clipboard().setText(text)
-        self.statusBar().showMessage(f"Copied {len(self._uartEvents)} UART entries to clipboard", 2000)
+        if current_tab == 0:  # Parsed tab
+            lines = []
+            for ev in self._uartEvents:
+                # Try to parse the frame to get checksum status
+                chk_status = ""
+                if ev.raw_data:
+                    parsed = parse_uart_message(ev.raw_data)
+                    if parsed:
+                        chk_status = " | CHK: ✓" if parsed.checksum_valid else " | CHK: ✗"
+
+                lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}{chk_status}")
+            text = "\n".join(lines)
+            QtWidgets.QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(f"Copied {len(self._uartEvents)} UART parsed entries to clipboard", 2000)
+        else:  # RAW tab
+            lines = []
+            for row in range(self.uartRawTable.rowCount()):
+                time_item = self.uartRawTable.item(row, 0)
+                data_item = self.uartRawTable.item(row, 1)
+                if time_item and data_item:
+                    lines.append(f"{time_item.text()} | {data_item.text()}")
+            text = "\n".join(lines)
+            QtWidgets.QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(f"Copied {len(lines)} UART RAW entries to clipboard", 2000)
 
     def _onCopyRawUart(self):
-        """Copy selected UART entry as raw hex data."""
-        selected = self.uartTable.selectionModel().selectedRows()
-        if not selected:
-            self.statusBar().showMessage("No UART entry selected", 2000)
-            return
-        row = selected[0].row()
-        if row < 0 or row >= len(self._uartEvents):
-            return
-        ev = self._uartEvents[row]
+        """Copy selected UART row based on active tab."""
+        current_tab = self.uartTabWidget.currentIndex()
 
-        # Try to get raw data first, then fallback to parsing message
-        if ev.raw_data is not None:
-            hex_data = ev.raw_data.hex()
-            QtWidgets.QApplication.clipboard().setText(hex_data)
-            self.statusBar().showMessage(f"Copied raw UART data ({len(ev.raw_data)} bytes) to clipboard", 2000)
-        else:
-            # Extract hex from message (format: "frame N bytes: HEXDATA")
-            msg = ev.message
-            if " bytes: " in msg:
-                hex_data = msg.split(" bytes: ")[1].split()[0]  # Get hex part before any additional text
+        if current_tab == 0:  # Parsed tab
+            selected = self.uartTable.selectionModel().selectedRows()
+            if not selected:
+                self.statusBar().showMessage("No UART entry selected", 2000)
+                return
+            row = selected[0].row()
+            if row < 0 or row >= len(self._uartEvents):
+                return
+            ev = self._uartEvents[row]
+
+            # Try to get raw data first, then fallback to parsing message
+            if ev.raw_data is not None:
+                hex_data = ev.raw_data.hex()
                 QtWidgets.QApplication.clipboard().setText(hex_data)
-                self.statusBar().showMessage(f"Copied raw UART data to clipboard", 2000)
+                self.statusBar().showMessage(f"Copied raw UART data ({len(ev.raw_data)} bytes) to clipboard", 2000)
             else:
-                QtWidgets.QApplication.clipboard().setText(msg)
-                self.statusBar().showMessage(f"Copied UART entry to clipboard", 2000)
+                # Extract hex from message (format: "frame N bytes: HEXDATA")
+                msg = ev.message
+                if " bytes: " in msg:
+                    hex_data = msg.split(" bytes: ")[1].split()[0]  # Get hex part before any additional text
+                    QtWidgets.QApplication.clipboard().setText(hex_data)
+                    self.statusBar().showMessage(f"Copied raw UART data to clipboard", 2000)
+                else:
+                    QtWidgets.QApplication.clipboard().setText(msg)
+                    self.statusBar().showMessage(f"Copied UART entry to clipboard", 2000)
+        else:  # RAW tab
+            selected = self.uartRawTable.selectionModel().selectedRows()
+            if not selected:
+                self.statusBar().showMessage("No UART RAW entry selected", 2000)
+                return
+            row = selected[0].row()
+            if row < 0 or row >= self.uartRawTable.rowCount():
+                return
+
+            # Copy the raw hex data from the selected row
+            data_item = self.uartRawTable.item(row, 1)
+            if data_item:
+                # Remove spaces for clean hex string
+                hex_data = data_item.text().replace(" ", "")
+                QtWidgets.QApplication.clipboard().setText(hex_data)
+                self.statusBar().showMessage(f"Copied UART RAW entry to clipboard", 2000)
 
     # TCP Search functionality
     def _onTcpSearchTextChanged(self):
