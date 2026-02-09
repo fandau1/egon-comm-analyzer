@@ -12,7 +12,8 @@ where:
 
 Checksum calculation:
 - 0x10 messages: (DST + SRC + CMD) & 0xFF
-- 0x43 messages: (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
+- 0x43 messages (generic): (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
+- 0x43 messages with CMD=0xA1 (special): (DST + SRC + CMD + all_data_bytes) & 0xFF
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -49,34 +50,44 @@ class UartMessage:
 
 
 def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
-    """Parse UART message according to supported formats."""
+    """Parse UART message according to supported formats.
 
-    if len(frame) < 5:  # Minimum: START DST SRC CHK END (for 0x10 without CMD, but we now expect 6 bytes)
+    Parser je záměrně tolerantnější k délce rámce, aby se při streamovém
+    čtení zbytečně neodmítaly rámce, které jsou z hlediska zařízení validní,
+    ale neodpovídají původní striktní definici (zejména 0x43 s CMD=0xA1).
+    """
+
+    if len(frame) < 5:
+        # Příliš krátké na to, aby obsahovalo cokoliv rozumného
         return None
 
-    # Check start and end bytes
     start_byte = frame[0]
-    if start_byte not in (0x10, 0x43) or frame[-1] != 0x16:
+
+    # Kontrola start bytu, ale END 0x16 bereme tolerantně – pokud chybí,
+    # UartReader takový frame typicky pošle jako dropped, tady ho jen neparsujeme.
+    if start_byte not in (0x10, 0x43):
         return None
 
-    # Extract checksum (second to last byte)
-    checksum = frame[-2]
+    # Pokud rámec končí 0x16, bereme předposlední bajt jako checksum,
+    # jinak checksum nevypočítáme korektně, ale zkusíme aspoň něco vyčíst.
+    has_end = frame[-1] == 0x16
+    checksum = frame[-2] if len(frame) >= 2 else 0
 
     if start_byte == 0x10:
-        # New Format 1: 10 DST SRC CMD CHK 16
-        # Exact length must be 6 bytes
-        if len(frame) != 6:
+        # Očekáváme alespoň 10 DST SRC CMD CHK (END je volitelný)
+        if len(frame) < 5:
             return None
 
         receiver_id = frame[1]  # DST
         sender_id = frame[2]    # SRC
         command = frame[3]      # CMD
 
-        data = b""  # No data payload for control messages
+        # Pro 0x10 máme podle nové specifikace bez datovou zprávu:
+        # 10 DST SRC CMD CHK 16  -> data = b""
+        data = b""
 
-        # Calculate expected checksum: (DST + SRC + CMD) & 0xFF
         expected_checksum = (receiver_id + sender_id + command) & 0xFF
-        checksum_valid = (checksum == expected_checksum)
+        checksum_valid = (checksum == expected_checksum) if has_end else False
 
         return UartMessage(
             sender_id=sender_id,
@@ -90,35 +101,33 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
             data_length=None,
         )
 
-    else:  # start_byte == 0x43
-        # Format 2: 43 DST SRC CMD LEN <data[LEN]> CHK 16
-        # Minimum length: 7 (43 DST SRC CMD LEN CHK 16 - with LEN=0)
+    # start_byte == 0x43 – datové zprávy
 
-        if len(frame) < 7:
+    # Základní hlavička musí mít aspoň 5 bajtů: 43 DST SRC CMD LEN
+    if len(frame) < 5:
+        return None
+
+    receiver_id = frame[1]  # DST
+    sender_id = frame[2]    # SRC
+    command = frame[3]      # CMD
+
+    # Speciální případ: CMD = 0xA1 – v reálném protokolu může mít jiný formát
+    # než generické 43-DST-SRC-CMD-LEN-data-LEN-CHK-16.
+    if command == 0xA1:
+        # Heuristika: rámec 43 DST SRC A1 ... CHK [16]
+        # - pokud končí 0x16 a má aspoň 6 bajtů, bereme předposlední jako CHK
+        # - data jsou všechno mezi CMD a CHK (ignorujeme pole LEN)
+        if len(frame) < 6:
             return None
 
-        receiver_id = frame[1]  # DST
-        sender_id = frame[2]    # SRC
-        command = frame[3]      # CMD
-        data_length = frame[4]  # LEN
+        # Data se berou od indexu 4 (bajt po CMD) do předposledního bajtu
+        # bez ohledu na to, co je v poli LEN (na pozici 4).
+        data_end_index = -2 if has_end else len(frame) - 1
+        data = frame[4:data_end_index]
 
-        # Calculate expected frame length: 1(start) + 1(dst) + 1(src) + 1(cmd) + 1(len) + data_length + 1(chk) + 1(end)
-        expected_frame_length = 7 + data_length
-
-        # Validate frame length matches the LEN field
-        if len(frame) != expected_frame_length:
-            return None
-
-        # Extract data (LEN bytes starting at position 5)
-        data = frame[5:5+data_length]
-
-        # Verify we extracted correct amount of data
-        if len(data) != data_length:
-            return None
-
-        # Calculate expected checksum: (DST + SRC + CMD + LEN + all_data_bytes) & 0xFF
-        expected_checksum = (receiver_id + sender_id + command + data_length + sum(data)) & 0xFF
-        checksum_valid = (checksum == expected_checksum)
+        # Přepočet checksumu bez LEN pole: (DST + SRC + CMD + data...)
+        expected_checksum = (receiver_id + sender_id + command + sum(data)) & 0xFF
+        checksum_valid = (checksum == expected_checksum) if has_end else False
 
         return UartMessage(
             sender_id=sender_id,
@@ -129,8 +138,52 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
             checksum_valid=checksum_valid,
             message_type="data",
             command=command,
-            data_length=data_length
+            data_length=len(data),
         )
+
+    # Generický případ 0x43: 43 DST SRC CMD LEN <data[LEN]> CHK 16
+    # Musíme mít alespoň do LEN (index 4)
+    if len(frame) < 6:
+        return None
+
+    data_length = frame[4]
+
+    # Pokud rámec končí 0x16 a délka sedí, použijeme přísné ověření,
+    # jinak se pokusíme o tolerantnější parsování s useknutými/extra daty.
+    expected_frame_length = 7 + data_length
+
+    if has_end and len(frame) == expected_frame_length:
+        # "ideální" případ – přesně odpovídá specifikaci
+        data = frame[5:5 + data_length]
+        if len(data) != data_length:
+            return None
+        expected_checksum = (receiver_id + sender_id + command + data_length + sum(data)) & 0xFF
+        checksum_valid = (checksum == expected_checksum)
+    else:
+        # Tolerantní režim: vezmeme data jako všechno mezi pozicí 5 a
+        # předposledním bajtem (pokud končí 0x16), nebo až do posledního bajtu.
+        data_end_index = -2 if has_end else len(frame) - 1
+        if data_end_index < 5:
+            return None
+        data = frame[5:data_end_index]
+        # Checksum počítáme z reálné délky dat, ale LEN pole ponecháme
+        # jako informativní (uložíme do data_length).
+        effective_len = len(data)
+        expected_checksum = (receiver_id + sender_id + command + effective_len + sum(data)) & 0xFF
+        checksum_valid = (checksum == expected_checksum) if has_end else False
+        # data_length pole necháme beze změny – zobrazí se v UI
+
+    return UartMessage(
+        sender_id=sender_id,
+        receiver_id=receiver_id,
+        data=data,
+        checksum=checksum,
+        raw=frame,
+        checksum_valid=checksum_valid,
+        message_type="data",
+        command=command,
+        data_length=data_length,
+    )
 
 
 # Color palette for different IDs (using pastel colors for better readability)

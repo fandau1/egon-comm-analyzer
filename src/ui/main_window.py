@@ -714,31 +714,63 @@ class MainWindow(QtWidgets.QMainWindow):
                 chk_item.setBackground(QtGui.QBrush(QtGui.QColor("#F8D7DA")))  # Light red
             self.uartTable.setItem(row, 8, chk_item)
         else:
-            # Unparsed message - detect the problem
-            start_ok = (frame[0] == 0x10 or frame[0] == 0x43) if len(frame) > 0 else False
-            end_ok = frame[-1] == 0x16 if len(frame) > 0 else False
+            # Unparsed or invalid message – try to diagnose the problem in more detail
+            start_ok = (len(frame) > 0 and frame[0] in (0x10, 0x43))
+            end_ok = (len(frame) > 0 and frame[-1] == 0x16)
 
-            if not start_ok and not end_ok:
-                problem = "⚠ chybí START (0x10/0x43) a END (0x16)"
-            elif not start_ok:
-                problem = "⚠ chybí START (0x10/0x43)"
-            elif not end_ok:
-                problem = "⚠ chybí END (0x16)"
-            else:
-                problem = "⚠ nevalidní formát"
+            # Základní informace
+            problems: list[str] = []
+            if not start_ok:
+                problems.append("chybí/špatný START (0x10/0x43)")
+            if not end_ok:
+                problems.append("chybí/špatný END (0x16)")
 
-            # Show raw data with error indication (now 9 columns)
-            self.uartTable.setItem(row, 1, QtWidgets.QTableWidgetItem("?"))
-            self.uartTable.setItem(row, 2, QtWidgets.QTableWidgetItem("?"))
-            self.uartTable.setItem(row, 3, QtWidgets.QTableWidgetItem("?"))
-            self.uartTable.setItem(row, 4, QtWidgets.QTableWidgetItem("?"))
-            self.uartTable.setItem(row, 5, QtWidgets.QTableWidgetItem("?"))
-            self.uartTable.setItem(row, 6, QtWidgets.QTableWidgetItem(frame.hex()))
-            self.uartTable.setItem(row, 7, QtWidgets.QTableWidgetItem(problem))
-            self.uartTable.setItem(row, 8, QtWidgets.QTableWidgetItem("?"))
+            # Délka rámce vs očekávání podle start bytu
+            if start_ok:
+                if frame[0] == 0x10:
+                    # 10 DST SRC CMD CHK 16 -> přesně 6 bytů
+                    if len(frame) != 6:
+                        problems.append(f"neočekávaná délka pro 0x10 (len={len(frame)}, oček. 6)")
+                elif frame[0] == 0x43:
+                    # Pokud máme aspoň do LEN bajtu, zkusíme spočítat očekávanou délku
+                    if len(frame) < 5:
+                        problems.append(f"příliš krátké pro 0x43 (len={len(frame)}, min 7)")
+                    else:
+                        data_len = frame[4]
+                        expected_len = 7 + data_len
+                        if len(frame) < 7:
+                            problems.append(f"příliš krátké pro 0x43 (len={len(frame)}, min 7)")
+                        elif len(frame) != expected_len:
+                            problems.append(f"délka neodpovídá LEN (len={len(frame)}, LEN={data_len}, oček. {expected_len})")
 
-            # Color row yellow to indicate parse error
-            warning_color = QtGui.QColor("#FFF4CC")  # Light yellow
+            if not problems:
+                problems.append("nevalidní formát rámce")
+
+            problem = "⚠ " + "; ".join(problems)
+
+            # Type column – označíme chybový rámec
+            type_item = QtWidgets.QTableWidgetItem("!")
+            type_item.setToolTip("Chyba parsování UART rámce")
+            self.uartTable.setItem(row, 1, type_item)
+
+            # Ostatní hlavičkové sloupce necháme prázdné, ať je jasné, že se je nepodařilo zjistit
+            for col in range(2, 6):
+                self.uartTable.setItem(row, col, QtWidgets.QTableWidgetItem("-"))
+
+            # Data (Hex)
+            hex_item = QtWidgets.QTableWidgetItem(frame.hex().upper())
+            self.uartTable.setItem(row, 6, hex_item)
+
+            # Data (String) – tady dáme text chyby
+            problem_item = QtWidgets.QTableWidgetItem(problem)
+            self.uartTable.setItem(row, 7, problem_item)
+
+            # CHK – neznámé
+            chk_item = QtWidgets.QTableWidgetItem("-")
+            self.uartTable.setItem(row, 8, chk_item)
+
+            # Barevné zvýraznění celého řádku jako varování
+            warning_color = QtGui.QColor("#FFF4CC")  # světle žlutá
             for col in range(self.uartTable.columnCount()):
                 item = self.uartTable.item(row, col)
                 if item:
@@ -1212,10 +1244,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 chk_status = ""
                 if ev.raw_data:
                     parsed = parse_uart_message(ev.raw_data)
-                    if parsed:
-                        chk_status = " | CHK: ✓" if parsed.checksum_valid else " | CHK: ✗"
-
-                lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}{chk_status}")
+                    if parsed is not None:
+                        chk_status = "✓" if parsed.checksum_valid else "✗"
+                        lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message} | CHK: {chk_status}")
+                    else:
+                        # Nezparsovatelný rámec – přidáme stručnou diagnostiku i do exportu
+                        start_ok = (len(ev.raw_data) > 0 and ev.raw_data[0] in (0x10, 0x43))
+                        end_ok = (len(ev.raw_data) > 0 and ev.raw_data[-1] == 0x16)
+                        problems = []
+                        if not start_ok:
+                            problems.append("bad START")
+                        if not end_ok:
+                            problems.append("bad END")
+                        if not problems:
+                            problems.append("invalid format")
+                        lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message} | PARSE_ERR: {', '.join(problems)} | RAW: {ev.raw_data.hex()}")
+                else:
+                    lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}")
             text = "\n".join(lines)
             QtWidgets.QApplication.clipboard().setText(text)
             self.statusBar().showMessage(f"Copied {len(self._uartEvents)} UART parsed entries to clipboard", 2000)
