@@ -1127,19 +1127,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # TCP Log Management
     def _onClearTcpLog(self):
-        """Clear TCP log based on active tab."""
-        current_tab = self.tcpTabWidget.currentIndex()
+        """Clear both TCP Parsed and RAW logs."""
+        # Clear Parsed tab
+        self.tcpTable.setRowCount(0)
+        self._tcpEvents.clear()
 
-        if current_tab == 0:  # Parsed tab
-            self.tcpTable.setRowCount(0)
-            self._tcpEvents.clear()
-            self.statusBar().showMessage("TCP parsed log cleared", 2000)
-        else:  # RAW tab
-            self.tcpRawTable.setRowCount(0)
-            self._tcpRawEvents.clear()
-            self._tcpRawBuffer.clear()
-            self._tcpRawDirection = ""
-            self.statusBar().showMessage("TCP RAW log cleared", 2000)
+        # Clear RAW tab
+        self.tcpRawTable.setRowCount(0)
+        self._tcpRawEvents.clear()
+        self._tcpRawBuffer.clear()
+        self._tcpRawDirection = ""
+
+        self.statusBar().showMessage("TCP log cleared (Parsed + RAW)", 2000)
 
     def _onCopyAllTcp(self):
         """Copy all TCP log entries to clipboard based on active tab."""
@@ -1197,19 +1196,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # UART Log Management
     def _onClearUartLog(self):
-        """Clear UART log based on active tab."""
-        current_tab = self.uartTabWidget.currentIndex()
+        """Clear both UART Parsed and RAW logs."""
+        # Clear Parsed tab
+        self.uartTable.setRowCount(0)
+        self._uartEvents.clear()
 
-        if current_tab == 0:  # Parsed tab
-            self.uartTable.setRowCount(0)
-            self._uartEvents.clear()
-            self.statusBar().showMessage("UART parsed log cleared", 2000)
-        else:  # RAW tab
-            self.uartRawTable.setRowCount(0)
-            self._uartRawEvents.clear()
-            self._uartRawBuffer.clear()
-            self._uartRawLastFlush = 0
-            self.statusBar().showMessage("UART RAW log cleared", 2000)
+        # Clear RAW tab
+        self.uartRawTable.setRowCount(0)
+        self._uartRawEvents.clear()
+        self._uartRawBuffer.clear()
+        self._uartRawLastFlush = 0
+
+        self.statusBar().showMessage("UART log cleared (Parsed + RAW)", 2000)
 
     def _onCopyAllUart(self):
         """Copy all UART log entries to clipboard based on active tab."""
