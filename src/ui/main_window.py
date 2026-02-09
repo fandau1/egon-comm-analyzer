@@ -353,32 +353,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpRawTable.setColumnWidth(1, 60)   # Direction
         tcpRawLayout.addWidget(self.tcpRawTable)
 
-        # TCP RAW search bar
-        tcpRawSearchLayout = QtWidgets.QHBoxLayout()
-        tcpRawSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
-        self.tcpRawSearchEdit = QtWidgets.QLineEdit()
-        self.tcpRawSearchEdit.setPlaceholderText("Enter text to search...")
-        self.tcpRawSearchPrevButton = QtWidgets.QPushButton("◄ Prev")
-        self.tcpRawSearchNextButton = QtWidgets.QPushButton("Next ►")
-        self.tcpRawSearchClearButton = QtWidgets.QPushButton("Clear")
-        tcpRawSearchLayout.addWidget(self.tcpRawSearchEdit)
-        tcpRawSearchLayout.addWidget(self.tcpRawSearchPrevButton)
-        tcpRawSearchLayout.addWidget(self.tcpRawSearchNextButton)
-        tcpRawSearchLayout.addWidget(self.tcpRawSearchClearButton)
-        tcpRawLayout.addLayout(tcpRawSearchLayout)
-
         self.tcpTabWidget.addTab(tcpRawTab, "RAW")
 
         tcpLayout.addWidget(self.tcpTabWidget)
-        # TCP search bar (for parsed view)
+        # TCP search bar (works for both Parsed and RAW tabs)
         tcpSearchLayout = QtWidgets.QHBoxLayout()
         tcpSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
         self.tcpSearchEdit = QtWidgets.QLineEdit()
         self.tcpSearchEdit.setPlaceholderText("Enter text to search...")
+        self.tcpSearchButton = QtWidgets.QPushButton("Search")
+        self.tcpSearchButton.setStyleSheet("font-weight: bold;")
         self.tcpSearchPrevButton = QtWidgets.QPushButton("◄ Prev")
         self.tcpSearchNextButton = QtWidgets.QPushButton("Next ►")
         self.tcpSearchClearButton = QtWidgets.QPushButton("Clear")
         tcpSearchLayout.addWidget(self.tcpSearchEdit)
+        tcpSearchLayout.addWidget(self.tcpSearchButton)
         tcpSearchLayout.addWidget(self.tcpSearchPrevButton)
         tcpSearchLayout.addWidget(self.tcpSearchNextButton)
         tcpSearchLayout.addWidget(self.tcpSearchClearButton)
@@ -424,32 +413,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartRawTable.setColumnWidth(0, 100)  # Time
         rawLayout.addWidget(self.uartRawTable)
 
-        # RAW search bar
-        rawSearchLayout = QtWidgets.QHBoxLayout()
-        rawSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
-        self.uartRawSearchEdit = QtWidgets.QLineEdit()
-        self.uartRawSearchEdit.setPlaceholderText("Enter hex to search (e.g., 10A055)...")
-        self.uartRawSearchPrevButton = QtWidgets.QPushButton("◄ Prev")
-        self.uartRawSearchNextButton = QtWidgets.QPushButton("Next ►")
-        self.uartRawSearchClearButton = QtWidgets.QPushButton("Clear")
-        rawSearchLayout.addWidget(self.uartRawSearchEdit)
-        rawSearchLayout.addWidget(self.uartRawSearchPrevButton)
-        rawSearchLayout.addWidget(self.uartRawSearchNextButton)
-        rawSearchLayout.addWidget(self.uartRawSearchClearButton)
-        rawLayout.addLayout(rawSearchLayout)
-
         self.uartTabWidget.addTab(rawTab, "RAW Hex")
 
         uartLayout.addWidget(self.uartTabWidget)
-        # UART search bar
+        # UART search bar (works for both Parsed and RAW tabs)
         uartSearchLayout = QtWidgets.QHBoxLayout()
         uartSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
         self.uartSearchEdit = QtWidgets.QLineEdit()
         self.uartSearchEdit.setPlaceholderText("Enter text to search...")
+        self.uartSearchButton = QtWidgets.QPushButton("Search")
+        self.uartSearchButton.setStyleSheet("font-weight: bold;")
         self.uartSearchPrevButton = QtWidgets.QPushButton("◄ Prev")
         self.uartSearchNextButton = QtWidgets.QPushButton("Next ►")
         self.uartSearchClearButton = QtWidgets.QPushButton("Clear")
         uartSearchLayout.addWidget(self.uartSearchEdit)
+        uartSearchLayout.addWidget(self.uartSearchButton)
         uartSearchLayout.addWidget(self.uartSearchPrevButton)
         uartSearchLayout.addWidget(self.uartSearchNextButton)
         uartSearchLayout.addWidget(self.uartSearchClearButton)
@@ -505,12 +483,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._synchronizingSelection = False  # prevent recursion
         self._tcpSearchResults: list[int] = []  # List of matching row indices
         self._tcpSearchIndex: int = -1  # Current position in search results
-        self._tcpRawSearchResults: list[int] = []
-        self._tcpRawSearchIndex: int = -1
         self._uartSearchResults: list[int] = []
         self._uartSearchIndex: int = -1
-        self._uartRawSearchResults: list[int] = []
-        self._uartRawSearchIndex: int = -1
         self._uartFilter = UartFilter(
             enabled=getattr(config, 'UART_FILTER_ENABLED', True),
             mode=getattr(config, 'UART_FILTER_MODE', 'include'),
@@ -533,26 +507,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartCopyAllButton.clicked.connect(self._onCopyAllUart)
         self.uartCopyRawButton.clicked.connect(self._onCopyRawUart)
         # Search functionality
-        self.tcpSearchEdit.returnPressed.connect(self._onTcpSearchNext)
-        self.tcpSearchEdit.textChanged.connect(self._onTcpSearchTextChanged)
+        self.tcpSearchEdit.returnPressed.connect(self._onTcpSearch)
+        self.tcpSearchButton.clicked.connect(self._onTcpSearch)
         self.tcpSearchNextButton.clicked.connect(self._onTcpSearchNext)
         self.tcpSearchPrevButton.clicked.connect(self._onTcpSearchPrev)
         self.tcpSearchClearButton.clicked.connect(self._onTcpSearchClear)
-        self.tcpRawSearchEdit.returnPressed.connect(self._onTcpRawSearchNext)
-        self.tcpRawSearchEdit.textChanged.connect(self._onTcpRawSearchTextChanged)
-        self.tcpRawSearchNextButton.clicked.connect(self._onTcpRawSearchNext)
-        self.tcpRawSearchPrevButton.clicked.connect(self._onTcpRawSearchPrev)
-        self.tcpRawSearchClearButton.clicked.connect(self._onTcpRawSearchClear)
-        self.uartSearchEdit.returnPressed.connect(self._onUartSearchNext)
-        self.uartSearchEdit.textChanged.connect(self._onUartSearchTextChanged)
+        self.uartSearchEdit.returnPressed.connect(self._onUartSearch)
+        self.uartSearchButton.clicked.connect(self._onUartSearch)
         self.uartSearchNextButton.clicked.connect(self._onUartSearchNext)
         self.uartSearchPrevButton.clicked.connect(self._onUartSearchPrev)
         self.uartSearchClearButton.clicked.connect(self._onUartSearchClear)
-        self.uartRawSearchEdit.returnPressed.connect(self._onUartRawSearchNext)
-        self.uartRawSearchEdit.textChanged.connect(self._onUartRawSearchTextChanged)
-        self.uartRawSearchNextButton.clicked.connect(self._onUartRawSearchNext)
-        self.uartRawSearchPrevButton.clicked.connect(self._onUartRawSearchPrev)
-        self.uartRawSearchClearButton.clicked.connect(self._onUartRawSearchClear)
         # Populate initially
         self.refresh_ifaces()
         self.refresh_serial_ports()
@@ -1285,12 +1249,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage(f"Copied UART RAW entry to clipboard", 2000)
 
     # TCP Search functionality
-    def _onTcpSearchTextChanged(self):
-        """Re-search when text changes."""
-        self._performTcpSearch()
+    def _onTcpSearch(self):
+        """Perform search in active TCP tab (triggered by Search button or Enter key)."""
+        current_tab = self.tcpTabWidget.currentIndex()
 
-    def _performTcpSearch(self):
-        """Perform search and highlight all matches."""
+        if current_tab == 0:  # Parsed tab
+            self._performTcpParsedSearch()
+        else:  # RAW tab
+            self._performTcpRawSearch()
+
+    def _performTcpParsedSearch(self):
+        """Perform search and highlight all matches in TCP Parsed table."""
         search_text = self.tcpSearchEdit.text().lower()
         self._tcpSearchResults.clear()
         self._tcpSearchIndex = -1
@@ -1301,10 +1270,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 for col in range(self.tcpTable.columnCount()):
                     item = self.tcpTable.item(row, col)
                     if item:
-                        # Reset font weight
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
+                        # Get original background color based on direction
+                        text = item.text()
+                        if "RX" in text:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#e7f7e7")))
+                        elif "TX" in text:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffe9e6")))
+                        else:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
             return
 
         # Search through all rows
@@ -1318,89 +1291,186 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if match_found:
                 self._tcpSearchResults.append(row)
-                # Highlight the row with bold text
+                # Highlight the row with yellow background
                 for col in range(self.tcpTable.columnCount()):
                     item = self.tcpTable.item(row, col)
                     if item:
-                        font = item.font()
-                        font.setBold(True)
-                        item.setFont(font)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#FFFF99")))  # Bright yellow
             else:
-                # Remove bold from non-matching rows
+                # Restore original color
                 for col in range(self.tcpTable.columnCount()):
                     item = self.tcpTable.item(row, col)
                     if item:
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
+                        text = item.text()
+                        if "RX" in text:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#e7f7e7")))
+                        elif "TX" in text:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffe9e6")))
+                        else:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
 
         # Update status
         if self._tcpSearchResults:
-            self.statusBar().showMessage(f"Found {len(self._tcpSearchResults)} matches in TCP log", 3000)
+            self.statusBar().showMessage(f"Found {len(self._tcpSearchResults)} matches in TCP Parsed log", 3000)
         else:
-            self.statusBar().showMessage("No matches found in TCP log", 3000)
+            self.statusBar().showMessage("No matches found in TCP Parsed log", 3000)
+
+    def _performTcpRawSearch(self):
+        """Perform search and highlight all matches in TCP RAW table."""
+        search_text = self.tcpSearchEdit.text().lower()
+        self._tcpSearchResults.clear()
+        self._tcpSearchIndex = -1
+
+        if not search_text:
+            # Clear all highlighting
+            for row in range(self.tcpRawTable.rowCount()):
+                for col in range(self.tcpRawTable.columnCount()):
+                    item = self.tcpRawTable.item(row, col)
+                    if item:
+                        # Restore original color based on direction
+                        if col == 1:  # Direction column
+                            dir_text = item.text().upper()
+                            if dir_text == "RX":
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#e7f7e7")))
+                            elif dir_text == "TX":
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#ffe9e6")))
+                            else:
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
+                        else:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
+            return
+
+        # Search through all rows
+        for row in range(self.tcpRawTable.rowCount()):
+            match_found = False
+            for col in range(self.tcpRawTable.columnCount()):
+                item = self.tcpRawTable.item(row, col)
+                if item and search_text in item.text().lower():
+                    match_found = True
+                    break
+
+            if match_found:
+                self._tcpSearchResults.append(row)
+                # Highlight the row with yellow background
+                for col in range(self.tcpRawTable.columnCount()):
+                    item = self.tcpRawTable.item(row, col)
+                    if item:
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#FFFF99")))  # Bright yellow
+            else:
+                # Restore original color
+                for col in range(self.tcpRawTable.columnCount()):
+                    item = self.tcpRawTable.item(row, col)
+                    if item:
+                        if col == 1:  # Direction column
+                            dir_text = item.text().upper()
+                            if dir_text == "RX":
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#e7f7e7")))
+                            elif dir_text == "TX":
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#ffe9e6")))
+                            else:
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
+                        else:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
+
+        # Update status
+        if self._tcpSearchResults:
+            self.statusBar().showMessage(f"Found {len(self._tcpSearchResults)} matches in TCP RAW log", 3000)
+        else:
+            self.statusBar().showMessage("No matches found in TCP RAW log", 3000)
 
     def _onTcpSearchNext(self):
-        """Navigate to next search result."""
+        """Navigate to next search result in active TCP tab."""
         if not self._tcpSearchResults:
-            self._performTcpSearch()
+            self._onTcpSearch()
             if not self._tcpSearchResults:
                 return
+
+        current_tab = self.tcpTabWidget.currentIndex()
+        table = self.tcpTable if current_tab == 0 else self.tcpRawTable
 
         self._tcpSearchIndex = (self._tcpSearchIndex + 1) % len(self._tcpSearchResults)
         row = self._tcpSearchResults[self._tcpSearchIndex]
-        self.tcpTable.selectRow(row)
-        self.tcpTable.scrollToItem(self.tcpTable.item(row, 0))
+        table.selectRow(row)
+        table.scrollToItem(table.item(row, 0))
         self.statusBar().showMessage(f"Match {self._tcpSearchIndex + 1} of {len(self._tcpSearchResults)}", 2000)
 
     def _onTcpSearchPrev(self):
-        """Navigate to previous search result."""
+        """Navigate to previous search result in active TCP tab."""
         if not self._tcpSearchResults:
-            self._performTcpSearch()
+            self._onTcpSearch()
             if not self._tcpSearchResults:
                 return
 
+        current_tab = self.tcpTabWidget.currentIndex()
+        table = self.tcpTable if current_tab == 0 else self.tcpRawTable
+
         self._tcpSearchIndex = (self._tcpSearchIndex - 1) % len(self._tcpSearchResults)
         row = self._tcpSearchResults[self._tcpSearchIndex]
-        self.tcpTable.selectRow(row)
-        self.tcpTable.scrollToItem(self.tcpTable.item(row, 0))
+        table.selectRow(row)
+        table.scrollToItem(table.item(row, 0))
         self.statusBar().showMessage(f"Match {self._tcpSearchIndex + 1} of {len(self._tcpSearchResults)}", 2000)
 
     def _onTcpSearchClear(self):
-        """Clear search."""
+        """Clear search in active TCP tab."""
         self.tcpSearchEdit.clear()
         self._tcpSearchResults.clear()
         self._tcpSearchIndex = -1
-        # Clear all highlighting
-        for row in range(self.tcpTable.rowCount()):
-            for col in range(self.tcpTable.columnCount()):
-                item = self.tcpTable.item(row, col)
-                if item:
-                    font = item.font()
-                    font.setBold(False)
-                    item.setFont(font)
+
+        current_tab = self.tcpTabWidget.currentIndex()
+
+        if current_tab == 0:  # Parsed tab
+            # Clear all highlighting
+            for row in range(self.tcpTable.rowCount()):
+                for col in range(self.tcpTable.columnCount()):
+                    item = self.tcpTable.item(row, col)
+                    if item:
+                        text = item.text()
+                        if "RX" in text:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#e7f7e7")))
+                        elif "TX" in text:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffe9e6")))
+                        else:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
+        else:  # RAW tab
+            for row in range(self.tcpRawTable.rowCount()):
+                for col in range(self.tcpRawTable.columnCount()):
+                    item = self.tcpRawTable.item(row, col)
+                    if item:
+                        if col == 1:  # Direction column
+                            dir_text = item.text().upper()
+                            if dir_text == "RX":
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#e7f7e7")))
+                            elif dir_text == "TX":
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#ffe9e6")))
+                            else:
+                                item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
+                        else:
+                            item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
 
     # UART Search functionality
-    def _onUartSearchTextChanged(self):
-        """Re-search when text changes."""
-        self._performUartSearch()
+    def _onUartSearch(self):
+        """Perform search in active UART tab (triggered by Search button or Enter key)."""
+        current_tab = self.uartTabWidget.currentIndex()
 
-    def _performUartSearch(self):
-        """Perform search and highlight all matches."""
+        if current_tab == 0:  # Parsed tab
+            self._performUartParsedSearch()
+        else:  # RAW tab
+            self._performUartRawSearch()
+
+    def _performUartParsedSearch(self):
+        """Perform search and highlight all matches in UART Parsed table."""
         search_text = self.uartSearchEdit.text().lower()
         self._uartSearchResults.clear()
         self._uartSearchIndex = -1
 
         if not search_text:
-            # Clear all highlighting
+            # Clear all highlighting - restore original colors
             for row in range(self.uartTable.rowCount()):
                 for col in range(self.uartTable.columnCount()):
                     item = self.uartTable.item(row, col)
                     if item:
-                        # Reset font weight
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
+                        # Try to restore original background (this is simplified)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
             return
 
         # Search through all rows
@@ -1414,78 +1484,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if match_found:
                 self._uartSearchResults.append(row)
-                # Highlight the row with bold text
+                # Highlight the row with yellow background
                 for col in range(self.uartTable.columnCount()):
                     item = self.uartTable.item(row, col)
                     if item:
-                        font = item.font()
-                        font.setBold(True)
-                        item.setFont(font)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#FFFF99")))  # Bright yellow
             else:
-                # Remove bold from non-matching rows
+                # Restore to white (simplified - original colors may vary)
                 for col in range(self.uartTable.columnCount()):
                     item = self.uartTable.item(row, col)
                     if item:
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
 
         # Update status
         if self._uartSearchResults:
-            self.statusBar().showMessage(f"Found {len(self._uartSearchResults)} matches in UART log", 3000)
+            self.statusBar().showMessage(f"Found {len(self._uartSearchResults)} matches in UART Parsed log", 3000)
         else:
-            self.statusBar().showMessage("No matches found in UART log", 3000)
-
-    def _onUartSearchNext(self):
-        """Navigate to next search result."""
-        if not self._uartSearchResults:
-            self._performUartSearch()
-            if not self._uartSearchResults:
-                return
-
-        self._uartSearchIndex = (self._uartSearchIndex + 1) % len(self._uartSearchResults)
-        row = self._uartSearchResults[self._uartSearchIndex]
-        self.uartTable.selectRow(row)
-        self.uartTable.scrollToItem(self.uartTable.item(row, 0))
-        self.statusBar().showMessage(f"Match {self._uartSearchIndex + 1} of {len(self._uartSearchResults)}", 2000)
-
-    def _onUartSearchPrev(self):
-        """Navigate to previous search result."""
-        if not self._uartSearchResults:
-            self._performUartSearch()
-            if not self._uartSearchResults:
-                return
-
-        self._uartSearchIndex = (self._uartSearchIndex - 1) % len(self._uartSearchResults)
-        row = self._uartSearchResults[self._uartSearchIndex]
-        self.uartTable.selectRow(row)
-        self.uartTable.scrollToItem(self.uartTable.item(row, 0))
-        self.statusBar().showMessage(f"Match {self._uartSearchIndex + 1} of {len(self._uartSearchResults)}", 2000)
-
-    def _onUartSearchClear(self):
-        """Clear search."""
-        self.uartSearchEdit.clear()
-        self._uartSearchResults.clear()
-        self._uartSearchIndex = -1
-        # Clear all highlighting
-        for row in range(self.uartTable.rowCount()):
-            for col in range(self.uartTable.columnCount()):
-                item = self.uartTable.item(row, col)
-                if item:
-                    font = item.font()
-                    font.setBold(False)
-                    item.setFont(font)
-
-    # UART RAW Search functionality
-    def _onUartRawSearchTextChanged(self):
-        """Re-search when text changes."""
-        self._performUartRawSearch()
+            self.statusBar().showMessage("No matches found in UART Parsed log", 3000)
 
     def _performUartRawSearch(self):
-        """Perform search and highlight all matches in RAW UART table."""
-        search_text = self.uartRawSearchEdit.text().replace(" ", "").lower()
-        self._uartRawSearchResults.clear()
-        self._uartRawSearchIndex = -1
+        """Perform search and highlight all matches in UART RAW table."""
+        search_text = self.uartSearchEdit.text().replace(" ", "").lower()
+        self._uartSearchResults.clear()
+        self._uartSearchIndex = -1
 
         if not search_text:
             # Clear all highlighting
@@ -1493,10 +1514,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 for col in range(self.uartRawTable.columnCount()):
                     item = self.uartRawTable.item(row, col)
                     if item:
-                        # Reset font weight
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
             return
 
         # Search through all rows
@@ -1512,163 +1530,76 @@ class MainWindow(QtWidgets.QMainWindow):
                         break
 
             if match_found:
-                self._uartRawSearchResults.append(row)
-                # Highlight the row with bold text
+                self._uartSearchResults.append(row)
+                # Highlight the row with yellow background
                 for col in range(self.uartRawTable.columnCount()):
                     item = self.uartRawTable.item(row, col)
                     if item:
-                        font = item.font()
-                        font.setBold(True)
-                        item.setFont(font)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#FFFF99")))  # Bright yellow
             else:
-                # Remove bold from non-matching rows
+                # Restore to white
                 for col in range(self.uartRawTable.columnCount()):
                     item = self.uartRawTable.item(row, col)
                     if item:
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
 
         # Update status
-        if self._uartRawSearchResults:
-            self.statusBar().showMessage(f"Found {len(self._uartRawSearchResults)} matches in UART RAW log", 3000)
+        if self._uartSearchResults:
+            self.statusBar().showMessage(f"Found {len(self._uartSearchResults)} matches in UART RAW log", 3000)
         else:
             self.statusBar().showMessage("No matches found in UART RAW log", 3000)
 
-    def _onUartRawSearchNext(self):
-        """Navigate to next search result in RAW table."""
-        if not self._uartRawSearchResults:
-            self._performUartRawSearch()
-            if not self._uartRawSearchResults:
+    def _onUartSearchNext(self):
+        """Navigate to next search result in active UART tab."""
+        if not self._uartSearchResults:
+            self._onUartSearch()
+            if not self._uartSearchResults:
                 return
 
-        self._uartRawSearchIndex = (self._uartRawSearchIndex + 1) % len(self._uartRawSearchResults)
-        row = self._uartRawSearchResults[self._uartRawSearchIndex]
-        self.uartRawTable.selectRow(row)
-        self.uartRawTable.scrollToItem(self.uartRawTable.item(row, 0))
-        self.statusBar().showMessage(f"Match {self._uartRawSearchIndex + 1} of {len(self._uartRawSearchResults)}", 2000)
+        current_tab = self.uartTabWidget.currentIndex()
+        table = self.uartTable if current_tab == 0 else self.uartRawTable
 
-    def _onUartRawSearchPrev(self):
-        """Navigate to previous search result in RAW table."""
-        if not self._uartRawSearchResults:
-            self._performUartRawSearch()
-            if not self._uartRawSearchResults:
+        self._uartSearchIndex = (self._uartSearchIndex + 1) % len(self._uartSearchResults)
+        row = self._uartSearchResults[self._uartSearchIndex]
+        table.selectRow(row)
+        table.scrollToItem(table.item(row, 0))
+        self.statusBar().showMessage(f"Match {self._uartSearchIndex + 1} of {len(self._uartSearchResults)}", 2000)
+
+    def _onUartSearchPrev(self):
+        """Navigate to previous search result in active UART tab."""
+        if not self._uartSearchResults:
+            self._onUartSearch()
+            if not self._uartSearchResults:
                 return
 
-        self._uartRawSearchIndex = (self._uartRawSearchIndex - 1) % len(self._uartRawSearchResults)
-        row = self._uartRawSearchResults[self._uartRawSearchIndex]
-        self.uartRawTable.selectRow(row)
-        self.uartRawTable.scrollToItem(self.uartRawTable.item(row, 0))
-        self.statusBar().showMessage(f"Match {self._uartRawSearchIndex + 1} of {len(self._uartRawSearchResults)}", 2000)
+        current_tab = self.uartTabWidget.currentIndex()
+        table = self.uartTable if current_tab == 0 else self.uartRawTable
 
-    def _onUartRawSearchClear(self):
-        """Clear search in RAW table."""
-        self.uartRawSearchEdit.clear()
-        self._uartRawSearchResults.clear()
-        self._uartRawSearchIndex = -1
-        # Clear all highlighting
-        for row in range(self.uartRawTable.rowCount()):
-            for col in range(self.uartRawTable.columnCount()):
-                item = self.uartRawTable.item(row, col)
-                if item:
-                    font = item.font()
-                    font.setBold(False)
-                    item.setFont(font)
+        self._uartSearchIndex = (self._uartSearchIndex - 1) % len(self._uartSearchResults)
+        row = self._uartSearchResults[self._uartSearchIndex]
+        table.selectRow(row)
+        table.scrollToItem(table.item(row, 0))
+        self.statusBar().showMessage(f"Match {self._uartSearchIndex + 1} of {len(self._uartSearchResults)}", 2000)
 
-    # TCP RAW Search functionality
-    def _onTcpRawSearchTextChanged(self):
-        """Re-search when text changes in TCP RAW."""
-        self._performTcpRawSearch()
+    def _onUartSearchClear(self):
+        """Clear search in active UART tab."""
+        self.uartSearchEdit.clear()
+        self._uartSearchResults.clear()
+        self._uartSearchIndex = -1
 
-    def _performTcpRawSearch(self):
-        """Perform search and highlight all matches in TCP RAW table."""
-        search_text = self.tcpRawSearchEdit.text().lower()
-        self._tcpRawSearchResults.clear()
-        self._tcpRawSearchIndex = -1
+        current_tab = self.uartTabWidget.currentIndex()
 
-        if not search_text:
+        if current_tab == 0:  # Parsed tab
             # Clear all highlighting
-            for row in range(self.tcpRawTable.rowCount()):
-                for col in range(self.tcpRawTable.columnCount()):
-                    item = self.tcpRawTable.item(row, col)
+            for row in range(self.uartTable.rowCount()):
+                for col in range(self.uartTable.columnCount()):
+                    item = self.uartTable.item(row, col)
                     if item:
-                        # Reset font weight
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
-            return
-
-        # Search through all rows
-        for row in range(self.tcpRawTable.rowCount()):
-            match_found = False
-            for col in range(self.tcpRawTable.columnCount()):
-                item = self.tcpRawTable.item(row, col)
-                if item and search_text in item.text().lower():
-                    match_found = True
-                    break
-
-            if match_found:
-                self._tcpRawSearchResults.append(row)
-                # Highlight the row with bold text
-                for col in range(self.tcpRawTable.columnCount()):
-                    item = self.tcpRawTable.item(row, col)
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
+        else:  # RAW tab
+            for row in range(self.uartRawTable.rowCount()):
+                for col in range(self.uartRawTable.columnCount()):
+                    item = self.uartRawTable.item(row, col)
                     if item:
-                        font = item.font()
-                        font.setBold(True)
-                        item.setFont(font)
-            else:
-                # Remove bold from non-matching rows
-                for col in range(self.tcpRawTable.columnCount()):
-                    item = self.tcpRawTable.item(row, col)
-                    if item:
-                        font = item.font()
-                        font.setBold(False)
-                        item.setFont(font)
-
-        # Update status
-        if self._tcpRawSearchResults:
-            self.statusBar().showMessage(f"Found {len(self._tcpRawSearchResults)} matches in TCP RAW log", 3000)
-        else:
-            self.statusBar().showMessage("No matches found in TCP RAW log", 3000)
-
-    def _onTcpRawSearchNext(self):
-        """Navigate to next search result in TCP RAW table."""
-        if not self._tcpRawSearchResults:
-            self._performTcpRawSearch()
-            if not self._tcpRawSearchResults:
-                return
-
-        self._tcpRawSearchIndex = (self._tcpRawSearchIndex + 1) % len(self._tcpRawSearchResults)
-        row = self._tcpRawSearchResults[self._tcpRawSearchIndex]
-        self.tcpRawTable.selectRow(row)
-        self.tcpRawTable.scrollToItem(self.tcpRawTable.item(row, 0))
-        self.statusBar().showMessage(f"Match {self._tcpRawSearchIndex + 1} of {len(self._tcpRawSearchResults)}", 2000)
-
-    def _onTcpRawSearchPrev(self):
-        """Navigate to previous search result in TCP RAW table."""
-        if not self._tcpRawSearchResults:
-            self._performTcpRawSearch()
-            if not self._tcpRawSearchResults:
-                return
-
-        self._tcpRawSearchIndex = (self._tcpRawSearchIndex - 1) % len(self._tcpRawSearchResults)
-        row = self._tcpRawSearchResults[self._tcpRawSearchIndex]
-        self.tcpRawTable.selectRow(row)
-        self.tcpRawTable.scrollToItem(self.tcpRawTable.item(row, 0))
-        self.statusBar().showMessage(f"Match {self._tcpRawSearchIndex + 1} of {len(self._tcpRawSearchResults)}", 2000)
-
-    def _onTcpRawSearchClear(self):
-        """Clear search in TCP RAW table."""
-        self.tcpRawSearchEdit.clear()
-        self._tcpRawSearchResults.clear()
-        self._tcpRawSearchIndex = -1
-        # Clear all highlighting
-        for row in range(self.tcpRawTable.rowCount()):
-            for col in range(self.tcpRawTable.columnCount()):
-                item = self.tcpRawTable.item(row, col)
-                if item:
-                    font = item.font()
-                    font.setBold(False)
-                    item.setFont(font)
-
+                        item.setBackground(QtGui.QBrush(QtGui.QColor("#ffffff")))
 
