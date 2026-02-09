@@ -66,6 +66,7 @@ class UartReader(QtCore.QObject):
 
         buf = bytearray()
         in_frame = False
+        frame_start_byte = None  # Track which START byte began the current frame
 
         try:
             while not self._stop.is_set():
@@ -84,6 +85,7 @@ class UartReader(QtCore.QObject):
                         buf.clear()
                         buf.append(byte)
                         in_frame = True
+                        frame_start_byte = byte  # Remember which START byte we used
 
                     elif byte == self.end_byte and in_frame:
                         # END byte - complete frame
@@ -91,6 +93,7 @@ class UartReader(QtCore.QObject):
                         frame = bytes(buf)
                         buf.clear()
                         in_frame = False
+                        frame_start_byte = None
 
                         # Validate and emit
                         if 2 <= len(frame) <= self.max_len:
@@ -101,14 +104,25 @@ class UartReader(QtCore.QObject):
                             self.frameDropped.emit(frame, "too_long")
 
                     elif in_frame:
-                        # Data byte
-                        buf.append(byte)
-
-                        # Buffer overflow check
-                        if len(buf) > self.max_len:
-                            self.frameDropped.emit(bytes(buf), "buffer_overflow")
+                        # Check if we encountered the SAME start byte again (error - missing END or new frame started)
+                        if byte == frame_start_byte and len(buf) > 1:
+                            # Same START byte found inside frame - this is an error
+                            # Drop the incomplete frame and start a new one
+                            self.frameDropped.emit(bytes(buf), "same_start_byte_in_frame")
                             buf.clear()
-                            in_frame = False
+                            buf.append(byte)
+                            frame_start_byte = byte
+                            # Stay in_frame = True, we just started a new frame
+                        else:
+                            # Normal data byte (or opposite START byte which is allowed)
+                            buf.append(byte)
+
+                            # Buffer overflow check
+                            if len(buf) > self.max_len:
+                                self.frameDropped.emit(bytes(buf), "buffer_overflow")
+                                buf.clear()
+                                in_frame = False
+                                frame_start_byte = None
 
                 except Exception as e:
                     self.errorOccurred.emit(f"UART read error: {e}")

@@ -322,13 +322,55 @@ class MainWindow(QtWidgets.QMainWindow):
         # Main splitter occupies most of the window
         split = QtWidgets.QSplitter()
 
-        # TCP Panel with buttons
+        # TCP Panel with tabs for parsed/raw view
         tcpPanel = QtWidgets.QWidget()
         tcpLayout = QtWidgets.QVBoxLayout(tcpPanel)
         tcpLayout.setContentsMargins(0, 0, 0, 0)
         tcpLayout.addWidget(QtWidgets.QLabel("TCP Monitor"))
-        tcpLayout.addWidget(self.tcpTable)
-        # TCP search bar
+
+        # Create tab widget for TCP views
+        self.tcpTabWidget = QtWidgets.QTabWidget()
+
+        # Parsed view tab
+        tcpParsedTab = QtWidgets.QWidget()
+        tcpParsedLayout = QtWidgets.QVBoxLayout(tcpParsedTab)
+        tcpParsedLayout.setContentsMargins(0, 0, 0, 0)
+        tcpParsedLayout.addWidget(self.tcpTable)
+        self.tcpTabWidget.addTab(tcpParsedTab, "Parsed")
+
+        # RAW view tab
+        tcpRawTab = QtWidgets.QWidget()
+        tcpRawLayout = QtWidgets.QVBoxLayout(tcpRawTab)
+        tcpRawLayout.setContentsMargins(0, 0, 0, 0)
+        self.tcpRawTable = QtWidgets.QTableWidget(0, 3)
+        self.tcpRawTable.setHorizontalHeaderLabels(["Time", "Direction", "Raw Data"])
+        self.tcpRawTable.horizontalHeader().setStretchLastSection(True)
+        self.tcpRawTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tcpRawTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tcpRawTable.setWordWrap(True)
+        self.tcpRawTable.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.tcpRawTable.setColumnWidth(0, 100)  # Time
+        self.tcpRawTable.setColumnWidth(1, 60)   # Direction
+        tcpRawLayout.addWidget(self.tcpRawTable)
+
+        # TCP RAW search bar
+        tcpRawSearchLayout = QtWidgets.QHBoxLayout()
+        tcpRawSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
+        self.tcpRawSearchEdit = QtWidgets.QLineEdit()
+        self.tcpRawSearchEdit.setPlaceholderText("Enter text to search...")
+        self.tcpRawSearchPrevButton = QtWidgets.QPushButton("◄ Prev")
+        self.tcpRawSearchNextButton = QtWidgets.QPushButton("Next ►")
+        self.tcpRawSearchClearButton = QtWidgets.QPushButton("Clear")
+        tcpRawSearchLayout.addWidget(self.tcpRawSearchEdit)
+        tcpRawSearchLayout.addWidget(self.tcpRawSearchPrevButton)
+        tcpRawSearchLayout.addWidget(self.tcpRawSearchNextButton)
+        tcpRawSearchLayout.addWidget(self.tcpRawSearchClearButton)
+        tcpRawLayout.addLayout(tcpRawSearchLayout)
+
+        self.tcpTabWidget.addTab(tcpRawTab, "RAW")
+
+        tcpLayout.addWidget(self.tcpTabWidget)
+        # TCP search bar (for parsed view)
         tcpSearchLayout = QtWidgets.QHBoxLayout()
         tcpSearchLayout.addWidget(QtWidgets.QLabel("Search:"))
         self.tcpSearchEdit = QtWidgets.QLineEdit()
@@ -454,12 +496,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lastTcpConnectTs: int | None = None
         self._tcpEvents: list[LogEvent] = []
         self._uartEvents: list[LogEvent] = []
+        self._tcpRawEvents: list[LogEvent] = []  # For TCP RAW view
+        self._tcpRawBuffer: bytearray = bytearray()  # Buffer for raw TCP bytes
+        self._tcpRawDirection: str = ""  # Last direction (RX/TX)
         self._uartRawEvents: list[LogEvent] = []  # For RAW hex view
         self._uartRawBuffer: bytearray = bytearray()  # Buffer for raw bytes
         self._uartRawLastFlush: float = 0  # Last time we flushed raw buffer
         self._synchronizingSelection = False  # prevent recursion
         self._tcpSearchResults: list[int] = []  # List of matching row indices
         self._tcpSearchIndex: int = -1  # Current position in search results
+        self._tcpRawSearchResults: list[int] = []
+        self._tcpRawSearchIndex: int = -1
         self._uartSearchResults: list[int] = []
         self._uartSearchIndex: int = -1
         self._uartRawSearchResults: list[int] = []
@@ -491,6 +538,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpSearchNextButton.clicked.connect(self._onTcpSearchNext)
         self.tcpSearchPrevButton.clicked.connect(self._onTcpSearchPrev)
         self.tcpSearchClearButton.clicked.connect(self._onTcpSearchClear)
+        self.tcpRawSearchEdit.returnPressed.connect(self._onTcpRawSearchNext)
+        self.tcpRawSearchEdit.textChanged.connect(self._onTcpRawSearchTextChanged)
+        self.tcpRawSearchNextButton.clicked.connect(self._onTcpRawSearchNext)
+        self.tcpRawSearchPrevButton.clicked.connect(self._onTcpRawSearchPrev)
+        self.tcpRawSearchClearButton.clicked.connect(self._onTcpRawSearchClear)
         self.uartSearchEdit.returnPressed.connect(self._onUartSearchNext)
         self.uartSearchEdit.textChanged.connect(self._onUartSearchTextChanged)
         self.uartSearchNextButton.clicked.connect(self._onUartSearchNext)
@@ -728,9 +780,13 @@ class MainWindow(QtWidgets.QMainWindow):
         baud = int(self.serialBaudEdit.text().strip())
 
         self.tcpTable.setRowCount(0)
+        self.tcpRawTable.setRowCount(0)
         self.uartTable.setRowCount(0)
         self.uartRawTable.setRowCount(0)
         self._tcpEvents.clear()
+        self._tcpRawEvents.clear()
+        self._tcpRawBuffer.clear()
+        self._tcpRawDirection = ""
         self._uartEvents.clear()
         self._uartRawEvents.clear()
         self._uartRawBuffer.clear()
@@ -769,6 +825,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def onStop(self):
         # Flush any remaining raw data
+        if hasattr(self, '_tcpRawBuffer') and len(self._tcpRawBuffer) > 0:
+            self._flushTcpRawBuffer()
         if hasattr(self, '_uartRawBuffer') and len(self._uartRawBuffer) > 0:
             self._flushRawBuffer()
 
@@ -788,6 +846,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.appendLog(LogEvent(int(time.time()*1000), "TCP", f"disconnected ({reason})"))
 
     def _onTcpDataDir(self, data: bytes, direction: str):
+        # Store direction for potential incomplete message flush
+        self._tcpRawDirection = direction
+
+        # Handle RAW TCP data buffering (messages terminated by \r\n)
+        self._tcpRawBuffer.extend(data)
+
+        # Process all complete messages (ending with \r\n)
+        while b'\r\n' in self._tcpRawBuffer:
+            idx = self._tcpRawBuffer.index(b'\r\n')
+            message = bytes(self._tcpRawBuffer[:idx])  # Extract message without \r\n
+            self._tcpRawBuffer = self._tcpRawBuffer[idx + 2:]  # Remove processed message + \r\n
+
+            if message:  # Only process non-empty messages
+                ts_ms = int(time.time() * 1000)
+
+                # Add to RAW table
+                raw_ev = LogEvent(ts_ms, "TCP", f"{len(message)} bytes")
+                raw_ev.raw_data = message
+                self._tcpRawEvents.append(raw_ev)
+
+                row = self.tcpRawTable.rowCount()
+                self.tcpRawTable.insertRow(row)
+
+                # Time column
+                time_item = QtWidgets.QTableWidgetItem(self._fmt_ts(ts_ms))
+                self.tcpRawTable.setItem(row, 0, time_item)
+
+                # Direction column
+                dir_item = QtWidgets.QTableWidgetItem(direction)
+                # Color code: RX = green, TX = orange
+                dir_color = QtGui.QColor("#e7f7e7") if direction.upper() == "RX" else QtGui.QColor("#ffe9e6")
+                dir_item.setBackground(QtGui.QBrush(dir_color))
+                self.tcpRawTable.setItem(row, 1, dir_item)
+
+                # Raw data column - decode as ASCII if possible
+                try:
+                    raw_text = message.decode('ascii', errors='ignore')
+                except Exception:
+                    raw_text = message.hex()
+
+                raw_item = QtWidgets.QTableWidgetItem(raw_text)
+                self.tcpRawTable.setItem(row, 2, raw_item)
+                self.tcpRawTable.scrollToBottom()
+
+        # Process parsed data
         rec = parse_tcp_message(data)
         ts_ms = int(time.time() * 1000)
         if rec is not None:
@@ -823,7 +926,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "too_short": "příliš krátká",
             "too_long": "příliš dlouhá",
             "buffer_overflow": "přetečení bufferu",
-            "incomplete_frame_interrupted": "nekompletní frame přerušen"
+            "incomplete_frame_interrupted": "nekompletní frame přerušen",
+            "same_start_byte_in_frame": "stejný START byte uvnitř zprávy"
         }
         reason_text = reason_map.get(reason, reason)
         msg = f"⚠ DROPPED frame ({reason_text}): {len(frame)} bytes: {frame.hex()}"
@@ -934,6 +1038,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self._uartRawBuffer.clear()
         self._uartRawLastFlush = time_module.time()
 
+    def _flushTcpRawBuffer(self):
+        """Flush any remaining TCP raw data (incomplete message without \r\n)."""
+        if len(self._tcpRawBuffer) == 0:
+            return
+
+        ts = int(time.time() * 1000)
+        raw_data = bytes(self._tcpRawBuffer)
+
+        # Create event
+        raw_ev = LogEvent(ts, "TCP", f"{len(raw_data)} bytes (incomplete)")
+        raw_ev.raw_data = raw_data
+        self._tcpRawEvents.append(raw_ev)
+
+        row = self.tcpRawTable.rowCount()
+        self.tcpRawTable.insertRow(row)
+
+        # Time column
+        time_item = QtWidgets.QTableWidgetItem(self._fmt_ts(ts))
+        self.tcpRawTable.setItem(row, 0, time_item)
+
+        # Direction column (use last known direction)
+        dir_item = QtWidgets.QTableWidgetItem(self._tcpRawDirection or "?")
+        # Incomplete message - light yellow warning
+        dir_item.setBackground(QtGui.QBrush(QtGui.QColor("#FFF9C4")))
+        self.tcpRawTable.setItem(row, 1, dir_item)
+
+        # Raw data column
+        try:
+            raw_text = raw_data.decode('ascii', errors='ignore') + " (incomplete)"
+        except Exception:
+            raw_text = raw_data.hex() + " (incomplete)"
+
+        raw_item = QtWidgets.QTableWidgetItem(raw_text)
+        raw_item.setBackground(QtGui.QBrush(QtGui.QColor("#FFF9C4")))  # Warning yellow
+        self.tcpRawTable.setItem(row, 2, raw_item)
+        self.tcpRawTable.scrollToBottom()
+
+        # Clear buffer
+        self._tcpRawBuffer.clear()
+
     def _onError(self, src: str, msg: str):
         self.appendLog(LogEvent(int(time.time()*1000), src, f"ERROR: {msg}"))
 
@@ -984,7 +1128,11 @@ class MainWindow(QtWidgets.QMainWindow):
     # TCP Log Management
     def _onClearTcpLog(self):
         self.tcpTable.setRowCount(0)
+        self.tcpRawTable.setRowCount(0)
         self._tcpEvents.clear()
+        self._tcpRawEvents.clear()
+        self._tcpRawBuffer.clear()
+        self._tcpRawDirection = ""
         self.statusBar().showMessage("TCP log cleared", 2000)
 
     def _onCopyAllTcp(self):
@@ -1349,6 +1497,102 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(self.uartRawTable.rowCount()):
             for col in range(self.uartRawTable.columnCount()):
                 item = self.uartRawTable.item(row, col)
+                if item:
+                    font = item.font()
+                    font.setBold(False)
+                    item.setFont(font)
+
+    # TCP RAW Search functionality
+    def _onTcpRawSearchTextChanged(self):
+        """Re-search when text changes in TCP RAW."""
+        self._performTcpRawSearch()
+
+    def _performTcpRawSearch(self):
+        """Perform search and highlight all matches in TCP RAW table."""
+        search_text = self.tcpRawSearchEdit.text().lower()
+        self._tcpRawSearchResults.clear()
+        self._tcpRawSearchIndex = -1
+
+        if not search_text:
+            # Clear all highlighting
+            for row in range(self.tcpRawTable.rowCount()):
+                for col in range(self.tcpRawTable.columnCount()):
+                    item = self.tcpRawTable.item(row, col)
+                    if item:
+                        # Reset font weight
+                        font = item.font()
+                        font.setBold(False)
+                        item.setFont(font)
+            return
+
+        # Search through all rows
+        for row in range(self.tcpRawTable.rowCount()):
+            match_found = False
+            for col in range(self.tcpRawTable.columnCount()):
+                item = self.tcpRawTable.item(row, col)
+                if item and search_text in item.text().lower():
+                    match_found = True
+                    break
+
+            if match_found:
+                self._tcpRawSearchResults.append(row)
+                # Highlight the row with bold text
+                for col in range(self.tcpRawTable.columnCount()):
+                    item = self.tcpRawTable.item(row, col)
+                    if item:
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+            else:
+                # Remove bold from non-matching rows
+                for col in range(self.tcpRawTable.columnCount()):
+                    item = self.tcpRawTable.item(row, col)
+                    if item:
+                        font = item.font()
+                        font.setBold(False)
+                        item.setFont(font)
+
+        # Update status
+        if self._tcpRawSearchResults:
+            self.statusBar().showMessage(f"Found {len(self._tcpRawSearchResults)} matches in TCP RAW log", 3000)
+        else:
+            self.statusBar().showMessage("No matches found in TCP RAW log", 3000)
+
+    def _onTcpRawSearchNext(self):
+        """Navigate to next search result in TCP RAW table."""
+        if not self._tcpRawSearchResults:
+            self._performTcpRawSearch()
+            if not self._tcpRawSearchResults:
+                return
+
+        self._tcpRawSearchIndex = (self._tcpRawSearchIndex + 1) % len(self._tcpRawSearchResults)
+        row = self._tcpRawSearchResults[self._tcpRawSearchIndex]
+        self.tcpRawTable.selectRow(row)
+        self.tcpRawTable.scrollToItem(self.tcpRawTable.item(row, 0))
+        self.statusBar().showMessage(f"Match {self._tcpRawSearchIndex + 1} of {len(self._tcpRawSearchResults)}", 2000)
+
+    def _onTcpRawSearchPrev(self):
+        """Navigate to previous search result in TCP RAW table."""
+        if not self._tcpRawSearchResults:
+            self._performTcpRawSearch()
+            if not self._tcpRawSearchResults:
+                return
+
+        self._tcpRawSearchIndex = (self._tcpRawSearchIndex - 1) % len(self._tcpRawSearchResults)
+        row = self._tcpRawSearchResults[self._tcpRawSearchIndex]
+        self.tcpRawTable.selectRow(row)
+        self.tcpRawTable.scrollToItem(self.tcpRawTable.item(row, 0))
+        self.statusBar().showMessage(f"Match {self._tcpRawSearchIndex + 1} of {len(self._tcpRawSearchResults)}", 2000)
+
+    def _onTcpRawSearchClear(self):
+        """Clear search in TCP RAW table."""
+        self.tcpRawSearchEdit.clear()
+        self._tcpRawSearchResults.clear()
+        self._tcpRawSearchIndex = -1
+        # Clear all highlighting
+        for row in range(self.tcpRawTable.rowCount()):
+            for col in range(self.tcpRawTable.columnCount()):
+                item = self.tcpRawTable.item(row, col)
                 if item:
                     font = item.font()
                     font.setBold(False)
