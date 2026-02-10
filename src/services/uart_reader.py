@@ -109,12 +109,37 @@ class UartReader(QtCore.QObject):
                     if byte == self.start_byte or byte == self.start_byte_alt:
                         if in_frame:
                             # We're already in a frame and received another START byte
-                            # This means the previous frame was incomplete (missing END byte)
-                            # Drop the incomplete frame and start new one
-                            if len(buf) > 1:  # Only drop if we had some data
-                                self.frameDropped.emit(bytes(buf), "incomplete_frame_interrupted")
+                            # Before dropping the current frame, check if it might be complete
+                            frame_might_be_complete = False
+
+                            if frame_start_byte == 0x10:
+                                # 0x10 frames: exactly 6 bytes (10 DST SRC CMD CHK 16)
+                                if len(buf) == 6 and buf[-1] == self.end_byte:
+                                    frame_might_be_complete = True
+                            elif frame_start_byte == 0x43 and expected_frame_length is not None:
+                                # 0x43 frames: check if we reached expected length with END byte
+                                if len(buf) == expected_frame_length and buf[-1] == self.end_byte:
+                                    frame_might_be_complete = True
+
+                            if frame_might_be_complete:
+                                # Current frame is complete - emit it first
+                                frame = bytes(buf)
+                                buf.clear()
+                                in_frame = False
+
+                                if 2 <= len(frame) <= self.max_len:
+                                    self.frameReceived.emit(frame)
+                                elif len(frame) < 2:
+                                    self.frameDropped.emit(frame, "too_short")
+                                else:
+                                    self.frameDropped.emit(frame, "too_long")
+                            else:
+                                # Frame is incomplete - drop it
+                                if len(buf) > 1:
+                                    self.frameDropped.emit(bytes(buf), "incomplete_frame_interrupted")
+                                buf.clear()
+
                             # Start new frame
-                            buf.clear()
                             buf.append(byte)
                             frame_start_byte = byte
                             frame_start_time = current_time
@@ -133,38 +158,36 @@ class UartReader(QtCore.QObject):
                         # We're in a frame - add byte to buffer
                         buf.append(byte)
 
-                        # For 0x43 messages: determine expected length after reading LEN field
-                        if frame_start_byte == 0x43 and expected_frame_length is None and len(buf) >= 5:
-                            # buf[0]=0x43, buf[1]=DST, buf[2]=SRC, buf[3]=CMD, buf[4]=LEN
-                            data_length = buf[4]
-                            # Expected total: 1(start) + 1(dst) + 1(src) + 1(cmd) + 1(len) + data_length + 1(chk) + 1(end)
-                            expected_frame_length = 7 + data_length
+                        # Determine expected frame length
+                        if expected_frame_length is None:
+                            if frame_start_byte == 0x10:
+                                # 0x10 messages have fixed length: 10 DST SRC CMD CHK 16 = 6 bytes
+                                expected_frame_length = 6
+                            elif frame_start_byte == 0x43 and len(buf) >= 5:
+                                # For 0x43: determine expected length after reading LEN field
+                                # buf[0]=0x43, buf[1]=DST, buf[2]=SRC, buf[3]=CMD, buf[4]=LEN
+                                data_length = buf[4]
+                                # Expected total: 1(start) + 1(dst) + 1(src) + 1(cmd) + 1(len) + data_length + 1(chk) + 1(end)
+                                expected_frame_length = 7 + data_length
 
                         # Check if frame is complete
                         frame_complete = False
+                        frame_has_valid_end = False
 
-                        if frame_start_byte == 0x43 and expected_frame_length is not None:
-                            # For 0x43: frame is complete when we reach expected length
+                        if expected_frame_length is not None:
+                            # Frame is complete when we reach expected length
                             if len(buf) == expected_frame_length:
-                                # Verify last byte is END byte
-                                if buf[-1] == self.end_byte:
-                                    frame_complete = True
-                                else:
-                                    # Expected END byte but got something else - frame error
-                                    self.frameDropped.emit(bytes(buf), "missing_end_byte")
-                                    buf.clear()
-                                    in_frame = False
-                                    frame_start_byte = None
-                                    frame_start_time = None
-                                    expected_frame_length = None
-                                    continue
-                        elif frame_start_byte == 0x10:
-                            # For 0x10: frame is complete when we see END byte
-                            if byte == self.end_byte:
                                 frame_complete = True
+                                # Check if last byte is END byte (0x16)
+                                frame_has_valid_end = (buf[-1] == self.end_byte)
+
+                                # Even if END byte is missing, we can still parse the frame
+                                # because we know the exact expected length
 
                         if frame_complete:
-                            # Frame is complete
+                            # Frame is complete (reached expected length)
+                            # Emit frame even if END byte is missing - parser can handle it
+                            # because we know the exact frame length from LEN field
                             frame = bytes(buf)
                             buf.clear()
                             in_frame = False

@@ -52,42 +52,38 @@ class UartMessage:
 def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
     """Parse UART message according to supported formats.
 
-    Parser je záměrně tolerantnější k délce rámce, aby se při streamovém
-    čtení zbytečně neodmítaly rámce, které jsou z hlediska zařízení validní,
-    ale neodpovídají původní striktní definici (zejména 0x43 s CMD=0xA1).
+    Supports:
+    - 0x10 messages: 10 DST SRC CMD CHK [16] (6 bytes, END optional)
+    - 0x43 messages: 43 DST SRC CMD LEN DATA[LEN] CHK [16] (7+LEN bytes, END optional)
+
+    Parser tolerates missing END byte (0x16) because reader ensures correct frame length.
     """
 
     if len(frame) < 5:
-        # Příliš krátké na to, aby obsahovalo cokoliv rozumného
         return None
 
     start_byte = frame[0]
 
-    # Kontrola start bytu, ale END 0x16 bereme tolerantně – pokud chybí,
-    # UartReader takový frame typicky pošle jako dropped, tady ho jen neparsujeme.
     if start_byte not in (0x10, 0x43):
         return None
 
-    # Pokud rámec končí 0x16, bereme předposlední bajt jako checksum,
-    # jinak checksum nevypočítáme korektně, ale zkusíme aspoň něco vyčíst.
-    has_end = frame[-1] == 0x16
-
     if start_byte == 0x10:
-        # Očekáváme alespoň 10 DST SRC CMD CHK (END je volitelný)
+        # 0x10 messages: 10 DST SRC CMD CHK [16]
+        # Minimum 5 bytes (without END), expected 6 bytes (with END)
         if len(frame) < 5:
             return None
 
         receiver_id = frame[1]  # DST
         sender_id = frame[2]    # SRC
         command = frame[3]      # CMD
-        checksum = frame[4]       # CHK
+        checksum = frame[4]     # CHK
 
-        # Pro 0x10 máme podle nové specifikace bez datovou zprávu:
-        # 10 DST SRC CMD CHK 16  -> data = b""
+        # No data payload for 0x10 messages
         data = b""
 
+        # Checksum: (DST + SRC + CMD) & 0xFF
         expected_checksum = (receiver_id + sender_id + command) & 0xFF
-        checksum_valid = (checksum == expected_checksum) if True else False
+        checksum_valid = (checksum == expected_checksum)
 
         return UartMessage(
             sender_id=sender_id,
@@ -100,26 +96,36 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
             command=command,
             data_length=None,
         )
+
     elif start_byte == 0x43:
-        # Základní hlavička musí mít aspoň 5 bajtů: 43 DST SRC CMD LEN
-        if len(frame) < 5:
+        # 0x43 messages: 43 DST SRC CMD LEN DATA[LEN] CHK [16]
+        # Minimum 7 bytes (without data or END), expected 7+LEN bytes (or 8+LEN with END)
+        if len(frame) < 7:
             return None
 
         receiver_id = frame[1]  # DST
         sender_id = frame[2]    # SRC
         command = frame[3]      # CMD
         data_len = frame[4]     # LEN
-        data_end_index = 4 + data_len
-        checksum_index = data_end_index + 1
-        checksum = frame[checksum_index]  # CHK
 
-        # Data se berou od indexu 4 (bajt po CMD) do předposledního bajtu
-        # bez ohledu na to, co je v poli LEN (na pozici 4).
-        data = frame[5:(data_end_index + 1)]
+        # Calculate positions
+        data_start_index = 5
+        data_end_index = 5 + data_len
+        checksum_index = data_end_index
 
-        # Přepočet checksumu bez LEN pole: (DST + SRC + CMD + data...)
+        # Check if we have enough bytes for the declared data length + checksum
+        if len(frame) < checksum_index + 1:
+            return None
+
+        # Extract data
+        data = frame[data_start_index:data_end_index]
+
+        # Extract checksum
+        checksum = frame[checksum_index]
+
+        # Checksum: (DST + SRC + CMD + LEN + sum(DATA)) & 0xFF
         expected_checksum = (receiver_id + sender_id + command + data_len + sum(data)) & 0xFF
-        checksum_valid = (checksum == expected_checksum) if True else False
+        checksum_valid = (checksum == expected_checksum)
 
         return UartMessage(
             sender_id=sender_id,
@@ -133,8 +139,7 @@ def parse_uart_message(frame: bytes) -> Optional[UartMessage]:
             data_length=len(data),
         )
 
-    else:
-        return None
+    return None
 
 
 # Color palette for different IDs (using pastel colors for better readability)
