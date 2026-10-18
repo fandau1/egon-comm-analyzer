@@ -897,15 +897,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # Store direction for potential incomplete message flush
         self._tcpRawDirection = direction
 
-        # Handle RAW TCP data buffering (messages terminated by \r\n)
+        # Buffer incoming bytes. Egon messages are ';'-terminated, but CRLF
+        # framing is still supported for plain line-based payloads.
         self._tcpRawBuffer.extend(data)
 
-        # Process all complete messages (ending with \r\n)
-        while b'\r\n' in self._tcpRawBuffer:
-            idx = self._tcpRawBuffer.index(b'\r\n')
-            message = bytes(self._tcpRawBuffer[:idx])  # Extract message without \r\n
-            self._tcpRawBuffer = self._tcpRawBuffer[idx + 2:]  # Remove processed message + \r\n
-
+        while True:
+            message = self._take_tcp_message()
+            if message is None:
+                break
             if message:  # Only process non-empty messages
                 ts_ms = int(time.time() * 1000)
 
@@ -928,11 +927,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 dir_item.setBackground(QtGui.QBrush(dir_color_raw))
                 self.tcpRawTable.setItem(row, 1, dir_item)
 
-                # Raw data column - decode as ASCII if possible
-                try:
-                    raw_text = message.decode('ascii', errors='ignore')
-                except Exception:
-                    raw_text = message.hex()
+                # Raw data column - printable text (binary bytes escaped)
+                raw_text = self._tcp_text(message)
 
                 raw_item = QtWidgets.QTableWidgetItem(raw_text)
                 self.tcpRawTable.setItem(row, 2, raw_item)
@@ -943,10 +939,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 parsed_msg = rec if rec is not None else None
 
                 # Vytvorit log event pro Parsed tab (message text pro kopirovani)
-                try:
-                    msg_text = message.decode('ascii', errors='ignore')
-                except Exception:
-                    msg_text = repr(message)
+                msg_text = self._tcp_text(message)
 
 
                 ev = LogEvent(ts_ms, "TCP", msg_text)
@@ -1025,7 +1018,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tcpTable.scrollToBottom()
 
         # Zbytek dat v _tcpRawBuffer necháváme pro případný další příjem
-        # self._tcpRawBuffer.clear()  # NE, nechceme mazat, dokud neskončí spojení
+
+    def _take_tcp_message(self) -> bytes | None:
+        """Extract the next complete message from the TCP receive buffer.
+
+        Egon protocol messages are terminated by ';'. CRLF is still accepted
+        as a terminator for plain line-based payloads.
+        """
+        semi = self._tcpRawBuffer.find(b';')
+        crlf = self._tcpRawBuffer.find(b'\r\n')
+        if semi < 0 and crlf < 0:
+            return None
+
+        if crlf < 0 or (0 <= semi < crlf):
+            cut = semi + 1
+        else:
+            cut = crlf + 2
+
+        message = bytes(self._tcpRawBuffer[:cut]).replace(b'\x00', b'')
+        del self._tcpRawBuffer[:cut]
+        return message.strip()
+
+    @staticmethod
+    def _tcp_text(data: bytes) -> str:
+        """Render TCP payload as printable text, escaping control/non-ASCII bytes."""
+        return ''.join(chr(b) if 32 <= b < 127 else f'\\x{b:02x}' for b in data)
 
     def _onUartFrame(self, frame: bytes):
         if not self._uartFilter.passes(frame):
@@ -1184,10 +1201,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcpRawTable.setItem(row, 1, dir_item)
 
         # Raw data column
-        try:
-            raw_text = raw_data.decode('ascii', errors='ignore') + " (incomplete)"
-        except Exception:
-            raw_text = raw_data.hex() + " (incomplete)"
+        raw_text = self._tcp_text(raw_data) + " (incomplete)"
 
         raw_item = QtWidgets.QTableWidgetItem(raw_text)
         raw_item.setBackground(QtGui.QBrush(QtGui.QColor("#FFF9C4")))  # Warning yellow
@@ -1267,7 +1281,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lines = []
             for ev in self._tcpEvents:
                 lines.append(f"{self._fmt_ts(ev.ts_ms)} | {ev.message}")
-            text = "\n".join(lines)
+            text = "\n".join(lines).replace("\x00", "")
             QtWidgets.QApplication.clipboard().setText(text)
             self.statusBar().showMessage(f"Copied {len(self._tcpEvents)} TCP parsed entries to clipboard", 2000)
         else:  # RAW tab
@@ -1278,7 +1292,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 data_item = self.tcpRawTable.item(row, 2)
                 if time_item and dir_item and data_item:
                     lines.append(f"{time_item.text()} | {dir_item.text()} | {data_item.text()}")
-            text = "\n".join(lines)
+            text = "\n".join(lines).replace("\x00", "")
             QtWidgets.QApplication.clipboard().setText(text)
             self.statusBar().showMessage(f"Copied {len(lines)} TCP RAW entries to clipboard", 2000)
 
