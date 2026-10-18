@@ -491,6 +491,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tcpRawDirection: str = ""  # Last direction (RX/TX)
         self._uartRawEvents: list[LogEvent] = []  # For RAW hex view
         self._uartRawBuffer: bytearray = bytearray()  # Buffer for raw bytes
+        self._uartRawFrame: bytearray = bytearray()  # Pending frame for RAW filtering
+        self._uartRawFrameStart: float = 0  # Time the pending RAW frame started
         self._uartRawLastFlush: float = 0  # Last time we flushed raw buffer
         self._synchronizingSelection = False  # prevent recursion
         self._tcpSearchResults: list[int] = []  # List of matching row indices
@@ -826,6 +828,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._uartEvents.clear()
         self._uartRawEvents.clear()
         self._uartRawBuffer.clear()
+        self._uartRawFrame.clear()
         self._uartRawLastFlush = 0
 
         iface_name = None
@@ -863,6 +866,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Flush any remaining raw data
         if hasattr(self, '_tcpRawBuffer') and len(self._tcpRawBuffer) > 0:
             self._flushTcpRawBuffer()
+        if hasattr(self, '_uartRawFrame') and len(self._uartRawFrame) > 0:
+            self._uartRawBuffer.extend(self._uartRawFrame)
+            self._uartRawFrame.clear()
         if hasattr(self, '_uartRawBuffer') and len(self._uartRawBuffer) > 0:
             self._flushRawBuffer()
 
@@ -1102,8 +1108,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Handle raw UART data without any frame parsing."""
         import time as time_module
 
-        # Add to buffer
-        self._uartRawBuffer.extend(data)
+        # With an active filter, drop excluded frames before they reach the
+        # RAW view. Otherwise just buffer the bytes as they arrive.
+        if self._uartFilter.enabled and self._uartFilter.patterns:
+            self._buffer_uart_raw(data)
+        else:
+            self._uartRawBuffer.extend(data)
 
         current_time = time_module.time()
 
@@ -1118,6 +1128,55 @@ class MainWindow(QtWidgets.QMainWindow):
         if should_flush and len(self._uartRawBuffer) > 0:
             self._flushRawBuffer()
 
+    def _buffer_uart_raw(self, data: bytes):
+        """Buffer raw bytes, applying the UART filter per complete frame."""
+        import time as time_module
+
+        for byte in data:
+            now = time_module.time()
+
+            # Incomplete frame timed out - keep its bytes as raw noise
+            if self._uartRawFrame and (now - self._uartRawFrameStart) > 0.5:
+                self._uartRawBuffer.extend(self._uartRawFrame)
+                self._uartRawFrame.clear()
+
+            if self._uartRawFrame:
+                expected = self._uart_raw_frame_length(self._uartRawFrame)
+                if byte in (0x10, 0x43) and (expected is None or len(self._uartRawFrame) < expected):
+                    # New frame started before the previous one completed
+                    self._uartRawBuffer.extend(self._uartRawFrame)
+                    self._uartRawFrame = bytearray([byte])
+                    self._uartRawFrameStart = now
+                    continue
+
+                self._uartRawFrame.append(byte)
+                expected = self._uart_raw_frame_length(self._uartRawFrame)
+
+                if expected is not None and len(self._uartRawFrame) >= expected:
+                    frame = bytes(self._uartRawFrame)
+                    self._uartRawFrame.clear()
+                    if self._uartFilter.passes(frame):
+                        self._uartRawBuffer.extend(frame)
+                elif len(self._uartRawFrame) > config.SERIAL_MAX_MESSAGE_LENGTH:
+                    self._uartRawBuffer.extend(self._uartRawFrame)
+                    self._uartRawFrame.clear()
+            elif byte in (0x10, 0x43):
+                self._uartRawFrame = bytearray([byte])
+                self._uartRawFrameStart = now
+            else:
+                self._uartRawBuffer.append(byte)
+
+    @staticmethod
+    def _uart_raw_frame_length(buf: bytearray) -> int | None:
+        """Expected total length of the buffered RAW frame, if known."""
+        if not buf:
+            return None
+        if buf[0] == 0x10:
+            return 6
+        if buf[0] == 0x43 and len(buf) >= 5:
+            return 7 + buf[4]
+        return None
+
     def _flushRawBuffer(self):
         """Flush accumulated raw data to the RAW table."""
         import time as time_module
@@ -1127,13 +1186,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ts = int(time.time() * 1000)
         raw_data = bytes(self._uartRawBuffer)
-
-        # Apply filter if enabled
-        if self._uartFilter.enabled:
-            # For raw data, we need to check if any part matches
-            # This is tricky - let's just show everything in RAW mode when filter is enabled
-            # User can use search to find specific patterns
-            pass
 
         # Create event
         raw_ev = LogEvent(ts, "UART", f"{len(raw_data)} bytes")
@@ -1338,6 +1390,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uartRawTable.setRowCount(0)
         self._uartRawEvents.clear()
         self._uartRawBuffer.clear()
+        self._uartRawFrame.clear()
         self._uartRawLastFlush = 0
 
         self.statusBar().showMessage("UART log cleared (Parsed + RAW)", 2000)
